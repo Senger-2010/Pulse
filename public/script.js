@@ -46,7 +46,7 @@
     quality: 'balanced'
   };
 
-  const qCap = () => S.quality === 'high' ? 2 : S.quality === 'low' ? 1 : 1.25;
+  const qCap = () => S.quality === 'high' ? 2 : S.quality === 'low' ? 1 : S.quality === 'potato' ? 0.75 : 1.25;
   const REDUCE = matchMedia('(prefers-reduced-motion: reduce)');
   const S = { ...DEF };
 
@@ -127,10 +127,8 @@
       body: JSON.stringify(payload)
     });
 
-    // Network problems, a missing API (404) and 5xx are worth retrying later.
     const retryable = err => !err.status || err.status === 404 || err.status >= 500;
 
-    // Merge an entry into a cached list the same way the server does.
     function mergeLocal(list, entry) {
       const k = pkey(entry);
       const prev = list.find(e => pkey(e) === k);
@@ -143,7 +141,6 @@
     }
 
     return {
-      // Last known scores for a map, or null if we've never seen any.
       peek(mapId) {
         const m = mem.get(mapId);
         if (m) return m.scores;
@@ -181,7 +178,6 @@
         }
       },
 
-      // Upload scores that were saved while the server was unreachable.
       async flush() {
         if (flushing) return;
         flushing = true;
@@ -191,9 +187,9 @@
             try {
               await post(q[0]);
             } catch (err) {
-              if (retryable(err)) break; // still offline, try again later
+              if (retryable(err)) break;
             }
-            q = q.slice(1); // sent, or rejected for good
+            q = q.slice(1);
             writeLS(PENDING_KEY, q);
           }
         } finally {
@@ -218,10 +214,6 @@
     };
   })();
 
-  // Console tools for the organiser:
-  //   rwLeaderboard.setKey('your ADMIN_KEY')
-  //   rwLeaderboard.clearMap('Map name or id')   rwLeaderboard.deleteName('Alex')
-  //   rwLeaderboard.deleteEntry('Map name or id', 'Alex', 'School')   rwLeaderboard.clearAll()
   const resolveMapId = x => {
     const lower = String(x).toLowerCase();
     const m = LIB.find(m => m.id === x || m.name.toLowerCase() === lower);
@@ -246,7 +238,6 @@
       return adminLog(Leaderboard.admin(q));
     },
     clearAll() { return adminLog(Leaderboard.admin({ all: 1 })); },
-    // kept for backwards compatibility with the old console commands
     clear() { return this.clearAll(); },
     deleteMap(map) { return this.clearMap(map); },
     delete(arg) {
@@ -256,9 +247,6 @@
     }
   };
 
-  /* ==========================================================================
-     Difficulty Overrides Storage
-     ========================================================================== */
   const DiffOverrides = {
     getAll() {
       try {
@@ -280,9 +268,6 @@
     }
   };
 
-  /* ==========================================================================
-     .sspm v2 Binary Format Parser
-     ========================================================================== */
   function parseSSPM(buf) {
     const dv = new DataView(buf);
     const u8 = new Uint8Array(buf);
@@ -329,7 +314,6 @@
     const dOff = off[6];
     const mOff = off[8];
 
-    // Read marker definitions
     let q = dOff;
     const dc = dv.getUint8(q++);
     const defs = [];
@@ -344,7 +328,6 @@
       defs.push({ nm, types });
     }
 
-    // Read map markers/notes
     q = mOff;
     const notes = [];
     for (let i = 0; i < markerCount; i++) {
@@ -411,10 +394,6 @@
     return m.nps < 3.5 ? 'easy' : m.nps < 6 ? 'hard' : m.nps < 9.5 ? 'insane' : 'death';
   }
 
-  /* ==========================================================================
-     Storage Subsystem (IndexedDB with Memory Fallback)
-     Blobs are stored with a version tag so a replaced server map is re-downloaded.
-     ========================================================================== */
   const Store = (() => {
     let db = null;
     const mem = { meta: new Map(), blob: new Map() };
@@ -439,7 +418,6 @@
       t.onerror = t.onabort = () => rej(t.error);
     });
 
-    // A stored blob is valid if no version is requested/stored, or the versions match.
     const okBlob = (r, ver) => (r && (ver == null || r.ver == null || r.ver === ver)) ? r.data : null;
 
     return {
@@ -502,7 +480,6 @@
   let LIB = [];
   async function refreshLib() {
     try { LIB = await Store.all(); } catch (e) { LIB = []; }
-    // Apply difficulty overrides from local storage
     for (const m of LIB) {
       const savedFolder = DiffOverrides.get(m.id);
       if (savedFolder) m.folder = savedFolder;
@@ -512,12 +489,6 @@
     renderLibrary();
   }
 
-  /* ==========================================================================
-     Server Maps (public/maps/ -> maps-manifest.json)
-     The manifest is generated at build time (scripts/build-manifest.mjs) and carries
-     each map's metadata, so the lobby is instant and a song is only downloaded when
-     it is first previewed/played (and then cached in IndexedDB).
-     ========================================================================== */
   const mapUrl = en => 'maps/' + en.file.split('/').map(encodeURIComponent).join('/') + (en.ver ? '?v=' + en.ver : '');
 
   async function fetchManifest() {
@@ -529,7 +500,6 @@
       }
     } catch (e) {}
 
-    // Fallback for plain dev servers that expose a directory listing at /maps/
     try {
       const res = await fetch('maps/');
       if (!res.ok) return null;
@@ -546,7 +516,6 @@
     }
   }
 
-  // URLs (they include the content hash) that failed to parse
   const BadMaps = {
     key: 'rw-bad-maps',
     list() { try { return JSON.parse(localStorage.getItem(this.key) || '[]'); } catch (e) { return []; } },
@@ -579,7 +548,6 @@
             continue;
           }
         } else {
-          // No metadata in the manifest: download + parse once, then remember it.
           prev = LIB.find(m => m.source === 'server' && m.remote === url) || null;
           if (prev) { seen.add(prev.id); continue; }
           if (BadMaps.has(url)) continue;
@@ -589,7 +557,7 @@
           try {
             meta = parseSSPM(buf).meta;
           } catch (e) {
-            BadMaps.add(url); // don't re-download a corrupt file on every visit
+            BadMaps.add(url);
             throw e;
           }
           meta.ver = en.ver;
@@ -602,19 +570,18 @@
         meta.sig = sig;
         meta.folder = DiffOverrides.get(meta.id) || en.folder || classify(meta);
         meta.added = prev ? prev.added : Date.now();
-        if (prev && prev.ver === meta.ver && prev.cv) meta.cv = prev.cv; // blob already cached
+        if (prev && prev.ver === meta.ver && prev.cv) meta.cv = prev.cv;
 
         seen.add(meta.id);
         await Store.putMeta(meta);
         ENT.delete(meta.id);
         changed = true;
       } catch (e) {
-        if (prev) seen.add(prev.id); // don't drop a working map because of a transient error
+        if (prev) seen.add(prev.id);
         console.warn('Skipping map ' + en.file + ':', e.message);
       }
     }
 
-    // Maps that were removed from the server folder disappear from the library.
     for (const m of LIB) {
       if (m.source === 'server' && !seen.has(m.id)) {
         await Store.del(m.id);
@@ -626,7 +593,6 @@
     if (changed) await refreshLib();
   }
 
-  // Download one map (or read it from the cache). Concurrent callers share one request.
   const FETCHING = new Map();
   function fetchBlob(meta) {
     if (FETCHING.has(meta.id)) return FETCHING.get(meta.id);
@@ -647,7 +613,6 @@
     return p;
   }
 
-  // Quietly download every server map in the background so previews start instantly.
   async function prefetchMaps() {
     if (navigator.connection && navigator.connection.saveData) return;
     try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
@@ -697,9 +662,6 @@
     return last;
   }
 
-  /* ==========================================================================
-     Map Cache
-     ========================================================================== */
   const ENT = new Map();
   async function loadEntry(meta) {
     if (ENT.has(meta.id)) {
@@ -733,9 +695,6 @@
     return e;
   }
 
-  /* ==========================================================================
-     Audio Processing Subsystem (Web Audio API)
-     ========================================================================== */
   let AC = null, master, analyser, sfx, previewEl, previewGain, freq = new Uint8Array(512), bass = 0;
 
   function initAudio() {
@@ -804,9 +763,6 @@
     g.connect(sfx);
   }
 
-  /* ==========================================================================
-     Lobby Preview Subsystem
-     ========================================================================== */
   let pvEntry = null, pvLast = -1, pvPerf = 0;
 
   function startPreview(e) {
@@ -850,9 +806,6 @@
     return ct * 1000 + Math.min(80, now - pvPerf);
   }
 
-  /* ==========================================================================
-     3D Canvas Engine & Scene Renderer
-     ========================================================================== */
   const lowerBound = (a, ms) => {
     let l = 0, h = a.length;
     while (l < h) {
@@ -946,7 +899,6 @@
     c.strokeStyle = RAILC;
     c.lineWidth = 1;
 
-    // Draw tunnel rail lines
     for (let k = 0; k < 3; k++) {
       c.globalAlpha = Math.min(1, (k === 0 ? 0.3 : k === 1 ? 0.16 : 0.07) + bs * (k === 0 ? 0.2 : 0.1));
       c.beginPath();
@@ -981,7 +933,6 @@
     o.camX = 0;
     o.camY = 0;
 
-    // Draw Note Blocks
     const N = o.notes;
     if (N && N.length) {
       const lo = lowerBound(N, t - 150);
@@ -1037,9 +988,9 @@
         c.globalAlpha = a * 0.3;
         c.beginPath();
         c.moveTo(fx - fh, fy - fh); c.lineTo(bx - bh, by - bh);
-        c.moveTo(fx + fh, fy - fh); c.lineTo(bx + bh, by - bh);
+        c.moveTo(fx + fh, fy - fh); c.lineTo(bx + bh, by + bh);
         c.moveTo(fx + fh, fy + fh); c.lineTo(bx + bh, by + bh);
-        c.moveTo(fx - fh, fy + fh); c.lineTo(bx - bh, by + bh);
+        c.moveTo(fx - fh, fy + fh); c.lineTo(bx - bh, by - bh);
         c.stroke();
 
         c.globalAlpha = a * 0.2;
@@ -1058,7 +1009,6 @@
       c.globalAlpha = 1;
     }
 
-    // Draw Cursor & Motion Trail
     if (o.cursor) {
       const tr = o.trail;
       if (tr) {
@@ -1109,9 +1059,6 @@
     return [w, h];
   }
 
-  /* ==========================================================================
-     Lobby Controllers & Card Leaderboard Hover Preview
-     ========================================================================== */
   let screen = 'splash', hov = null, hovTok = 0;
   const lastPick = {};
   const bgC = $('#bg'), bgX = bgC.getContext('2d');
@@ -1144,7 +1091,6 @@
         chips.insertAdjacentHTML('beforeend', '<li>' + esc(t) + '</li>');
       }
 
-      // Hover leaderboard: show what we know right away, then refresh from the server
       paintCardBoard(Leaderboard.peek(m.id));
       Leaderboard.get(m.id).then(r => {
         if (hov && hov.meta && hov.meta.id === m.id) paintCardBoard(r.scores);
@@ -1280,13 +1226,10 @@
       notes: null,
       approach: 1400,
       bass,
-      lowFx: S.quality === 'low'
+      lowFx: S.quality === 'low' || S.quality === 'potato'
     });
   }
 
-  /* ==========================================================================
-     Open House Player Modal Prompt
-     ========================================================================== */
   let pendingMetaToStart = null;
 
   function promptPlayerAndStart(meta) {
@@ -1325,9 +1268,6 @@
     pendingMetaToStart = null;
   };
 
-  /* ==========================================================================
-     Main Game Engine & Loop
-     ========================================================================== */
   const cv = $('#game'), cx = cv.getContext('2d');
   let g = null, gW = 0, gH = 0, gDpr = 1;
 
@@ -1549,12 +1489,17 @@
     g.cdStart = performance.now();
   }
 
-  // Hit Detection & Logic Judge
+  // Hit Detection & Logic Judge (Updated to disallow early hits)
   function judge(t) {
     const N = g.notes, st = g.states;
     for (let i = g.lo; i < g.N; i++) {
       const n = N[i];
       if (st[i] !== 0) continue;
+
+      // Prevent early hits: if current time is before note time, do not register hit yet
+      if (t < n.ms) {
+        break;
+      }
 
       // Restrict note processing if it exceeds max late time (MAX_LATE_TIME = 70ms)
       if (t > n.ms + MAX_LATE_TIME) {
@@ -1567,8 +1512,6 @@
         blip('miss');
         continue;
       }
-
-      if (n.ms > t + MAX_LATE_TIME) break;
 
       if (Math.abs(n.x - 1 - g.cur.x) <= (NOTE + CUR) / 2 && Math.abs(n.y - 1 - g.cur.y) <= (NOTE + CUR) / 2) {
         st[i] = 1;
@@ -1637,7 +1580,7 @@
       cursor: g.cur,
       trail: g.trail,
       cam: g.cam,
-      lowFx: S.quality === 'low'
+      lowFx: S.quality === 'low' || S.quality === 'potato'
     };
 
     drawScene(cx, gW, gH, o);
@@ -1645,7 +1588,6 @@
     drawHUD(cx, gW, gH, t);
   }
 
-  // Draw HUD Overlay Elements
   function drawHUD(c, W, H, t) {
     const pad = Math.max(16, W * 0.025);
     const big = Math.round(clamp(W * 0.032, 20, 38));
@@ -1673,7 +1615,6 @@
     c.fillText(g.meta.name.length > 44 ? g.meta.name.slice(0, 43) + '…' : g.meta.name, W - pad, pad + big * 0.6);
     c.fillText('ESC pause', W - pad, pad + big * 1.3);
 
-    // Health Bar
     const bw = Math.min(W * 0.34, 420);
     const bx = (W - bw) / 2;
     const by = H - pad - 10;
@@ -1684,7 +1625,6 @@
     c.fillStyle = pct < 0.34 ? '#ff3d71' : pct < 0.6 ? '#ffa53d' : '#3ddc97';
     c.fillRect(bx, by, bw * pct, 8);
 
-    // Combo Tracker
     if (g.combo > 1) {
       const pop = clamp(1 - (t - g.lastHit) / 120, 0, 1);
       c.textAlign = 'center';
@@ -1693,7 +1633,6 @@
       c.fillText(g.combo, W / 2, H - pad - 34);
     }
 
-    // Damage Effect Flash
     const mf = 1 - (performance.now() - g.lastMiss) / 350;
     if (mf > 0) {
       const gr = c.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.max(W, H) * 0.75);
@@ -1703,7 +1642,6 @@
       c.fillRect(0, 0, W, H);
     }
 
-    // Intro Title Card
     if (t < 0) {
       const a = clamp(1 + t / 600, 0, 1) * clamp((-t) / 400, 0, 1);
       c.textAlign = 'center';
@@ -1716,7 +1654,6 @@
       c.fillText('mapped by ' + g.meta.mapper, W / 2, H * 0.2 + big * 0.9);
     }
 
-    // Countdown Text
     if (g.countdown > 0) {
       const left = 3 - Math.floor((performance.now() - g.cdStart) / 1000);
       c.textAlign = 'center';
@@ -1726,9 +1663,6 @@
     }
   }
 
-  /* ==========================================================================
-     Results Screen & Leaderboard Record
-     ========================================================================== */
   let backTimer = null;
 
   function endGame(win, t) {
@@ -1820,7 +1754,7 @@
       cleared: win,
       progress: Math.floor(prog)
     });
-    if (g !== gg) return; // player already left the results screen
+    if (g !== gg) return;
 
     if (r.error) {
       el.textContent = 'Score not saved: ' + r.error;
@@ -1901,23 +1835,18 @@
     refreshLib();
   }
 
-  // Event Handlers for Navigation Controls
   $('#btnBack').onclick = toLobby;
   $('#btnReplay').onclick = () => { const m = g.meta; g.over = true; startGame(m); };
   $('#pResume').onclick = resumeGame;
   $('#pRestart').onclick = () => { const m = g.meta; stopSource(); g.over = true; startGame(m); };
   $('#pQuit').onclick = toLobby;
 
-  /* ==========================================================================
-     Leaderboard Modal Rendering & Controls
-     ========================================================================== */
   let lbTok = 0, lbTimer = null;
 
   function openLeaderboard(mapId) {
     renderLeaderboardModal(mapId);
     $('#leaderboardModal').hidden = false;
     clearInterval(lbTimer);
-    // live refresh while the board is on screen (handy on a shared open-house display)
     lbTimer = setInterval(() => {
       if ($('#leaderboardModal').hidden) return clearInterval(lbTimer);
       updateLeaderboardView($('#lbMapSelect').value, true);
@@ -1961,7 +1890,7 @@
     if (cached == null) listEl.innerHTML = '<div class="empty">Loading scores…</div>';
 
     const { scores, offline } = await Leaderboard.get(mapId, force);
-    if (tok !== lbTok) return; // a newer request replaced this one
+    if (tok !== lbTok) return;
 
     const note = offline ? '<div class="empty">Server unreachable. Showing the last known scores.</div>' : '';
     if (!scores.length) {
@@ -1995,16 +1924,12 @@
   $('#lbMapSelect').onchange = e => updateLeaderboardView(e.target.value, true);
   $('#btnLeaderboard').onclick = () => openLeaderboard(hov && hov.meta ? hov.meta.id : null);
   $('#btnResLeaderboard').onclick = () => {
-    // stop the auto-return countdown so the player can read the board in peace
     clearInterval(backTimer);
     $('#btnBack').textContent = 'Back';
     openLeaderboard(g && g.meta ? g.meta.id : null);
   };
   $('#lbClose').onclick = () => { $('#leaderboardModal').hidden = true; clearInterval(lbTimer); };
 
-  /* ==========================================================================
-     Library Management & Settings Listeners
-     ========================================================================== */
   function renderLibrary() {
     const root = $('#libCols');
     if (!root) return;
@@ -2119,7 +2044,6 @@
     saveS();
   };
 
-  // Drag and Drop Logic
   let dragN = 0;
   addEventListener('dragenter', e => {
     e.preventDefault();
@@ -2149,9 +2073,6 @@
     toastT = setTimeout(() => t.hidden = true, 3600);
   }
 
-  /* ==========================================================================
-     Bootstrapper
-     ========================================================================== */
   $('#btnStart').onclick = () => {
     initAudio();
     AC.resume();
@@ -2179,10 +2100,10 @@
 
   renderCard();
   Store.ready.then(async () => {
-    await refreshLib();       // instant: whatever is cached from last visit
-    await syncServerMaps();   // then pick up new/changed/removed maps from /maps/
-    Leaderboard.flush();      // upload any scores saved while offline
-    prefetchMaps();           // warm the cache in the background
+    await refreshLib();
+    await syncServerMaps();
+    Leaderboard.flush();
+    prefetchMaps();
   });
   requestAnimationFrame(loop);
 
