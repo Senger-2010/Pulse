@@ -25,7 +25,7 @@
      Configuration & Constants
      ========================================================================== */
   // Adjustable timing window limit (in milliseconds) - adjustable only in script.js
-  const MAX_LATE_TIME = 120;
+  const MAX_LATE_TIME = 55;
 
   const FOLDERS = [
     { key: 'easy', label: 'Easy', color: '#3ddc97' },
