@@ -24,7 +24,6 @@
   /* ==========================================================================
      Configuration & Constants
      ========================================================================== */
-  // Adjustable timing window limit (in milliseconds) - adjustable only in script.js
   const MAX_LATE_TIME = 70;
 
   const FOLDERS = [
@@ -35,7 +34,6 @@
   ];
   const FOLDER = Object.fromEntries(FOLDERS.map(f => [f.key, f]));
 
-  // Default Game Settings
   const DEF = {
     sens: 1.2,
     approach: 900,
@@ -50,7 +48,6 @@
   const REDUCE = matchMedia('(prefers-reduced-motion: reduce)');
   const S = { ...DEF };
 
-  // Load Saved Settings from LocalStorage
   try {
     Object.assign(S, JSON.parse(localStorage.getItem('rw-settings') || '{}'));
   } catch (e) {}
@@ -61,7 +58,6 @@
     } catch (e) {}
   };
 
-  // Playfield Rendering Constants
   const D = 3.4;
   const ZMAX = 46;
   const NOTE = 0.88;
@@ -74,20 +70,49 @@
   const COLS = ['255,61,113', '53,214,255'];
 
   /* ==========================================================================
-     Leaderboard (stored on the server via the Netlify Function /api/scores,
-     with a local cache + retry queue so the game still works offline)
+     Leaderboard & Local Replays Storage
      ========================================================================== */
   let currentPlayer = {
     name: localStorage.getItem('oh-player-name') || '',
     school: localStorage.getItem('oh-player-school') || ''
   };
 
+  const ReplayStore = (() => {
+    const KEY = 'rw-replays-top3';
+
+    function getMapStore() {
+      try {
+        return JSON.parse(localStorage.getItem(KEY) || '{}');
+      } catch (e) {
+        return {};
+      }
+    }
+
+    return {
+      get(mapId, rankIndex) {
+        const store = getMapStore();
+        return (store[mapId] && store[mapId][rankIndex]) || null;
+      },
+      save(mapId, entry, replayData) {
+        const store = getMapStore();
+        if (!store[mapId]) store[mapId] = [];
+        const record = { ...entry, replay: replayData, ts: Date.now() };
+        store[mapId].push(record);
+        store[mapId].sort((a, b) => b.score - a.score || b.acc - a.acc);
+        store[mapId] = store[mapId].slice(0, 3);
+        try {
+          localStorage.setItem(KEY, JSON.stringify(store));
+        } catch (e) {}
+      }
+    };
+  })();
+
   const Leaderboard = (() => {
     const API = '/api/scores';
     const CACHE_KEY = 'rw-lb-cache';
     const PENDING_KEY = 'rw-lb-pending';
     const TTL = 15000;
-    const mem = new Map(); // mapId -> { t, scores }
+    const mem = new Map();
     let flushing = false;
 
     const readLS = (k, d) => {
@@ -127,10 +152,8 @@
       body: JSON.stringify(payload)
     });
 
-    // Network problems, a missing API (404) and 5xx are worth retrying later.
     const retryable = err => !err.status || err.status === 404 || err.status >= 500;
 
-    // Merge an entry into a cached list the same way the server does.
     function mergeLocal(list, entry) {
       const k = pkey(entry);
       const prev = list.find(e => pkey(e) === k);
@@ -143,7 +166,6 @@
     }
 
     return {
-      // Last known scores for a map, or null if we've never seen any.
       peek(mapId) {
         const m = mem.get(mapId);
         if (m) return m.scores;
@@ -181,7 +203,6 @@
         }
       },
 
-      // Upload scores that were saved while the server was unreachable.
       async flush() {
         if (flushing) return;
         flushing = true;
@@ -191,70 +212,17 @@
             try {
               await post(q[0]);
             } catch (err) {
-              if (retryable(err)) break; // still offline, try again later
+              if (retryable(err)) break;
             }
-            q = q.slice(1); // sent, or rejected for good
+            q = q.slice(1);
             writeLS(PENDING_KEY, q);
           }
         } finally {
           flushing = false;
         }
-      },
-
-      adminKey() {
-        try { return sessionStorage.getItem('rw-admin-key') || ''; } catch (e) { return ''; }
-      },
-
-      async admin(params) {
-        const qs = new URLSearchParams(params).toString();
-        const data = await request(API + '?' + qs, {
-          method: 'DELETE',
-          headers: { 'x-admin-key': this.adminKey() }
-        });
-        mem.clear();
-        writeLS(CACHE_KEY, {});
-        return data;
       }
     };
   })();
-
-  // Console tools for the organiser:
-  //   rwLeaderboard.setKey('your ADMIN_KEY')
-  //   rwLeaderboard.clearMap('Map name or id')   rwLeaderboard.deleteName('Alex')
-  //   rwLeaderboard.deleteEntry('Map name or id', 'Alex', 'School')   rwLeaderboard.clearAll()
-  const resolveMapId = x => {
-    const lower = String(x).toLowerCase();
-    const m = LIB.find(m => m.id === x || m.name.toLowerCase() === lower);
-    return m ? m.id : x;
-  };
-  const adminLog = p => p.then(r => console.log('Done:', r), e => console.warn('Failed:', e.message));
-
-  window.rwLeaderboard = {
-    setKey(k) {
-      try { sessionStorage.setItem('rw-admin-key', k); } catch (e) {}
-      console.log('Admin key saved for this tab.');
-    },
-    clearMap(map) { return adminLog(Leaderboard.admin({ map: resolveMapId(map) })); },
-    deleteName(name, school) {
-      const q = { name };
-      if (school) q.school = school;
-      return adminLog(Leaderboard.admin(q));
-    },
-    deleteEntry(map, name, school) {
-      const q = { map: resolveMapId(map), name };
-      if (school) q.school = school;
-      return adminLog(Leaderboard.admin(q));
-    },
-    clearAll() { return adminLog(Leaderboard.admin({ all: 1 })); },
-    // kept for backwards compatibility with the old console commands
-    clear() { return this.clearAll(); },
-    deleteMap(map) { return this.clearMap(map); },
-    delete(arg) {
-      if (!arg || arg === '--clear') return this.clearAll();
-      if (LIB.some(m => m.id === arg || m.name.toLowerCase() === String(arg).toLowerCase())) return this.clearMap(arg);
-      return this.deleteName(arg);
-    }
-  };
 
   /* ==========================================================================
      Difficulty Overrides Storage
@@ -329,7 +297,6 @@
     const dOff = off[6];
     const mOff = off[8];
 
-    // Read marker definitions
     let q = dOff;
     const dc = dv.getUint8(q++);
     const defs = [];
@@ -344,7 +311,6 @@
       defs.push({ nm, types });
     }
 
-    // Read map markers/notes
     q = mOff;
     const notes = [];
     for (let i = 0; i < markerCount; i++) {
@@ -412,8 +378,7 @@
   }
 
   /* ==========================================================================
-     Storage Subsystem (IndexedDB with Memory Fallback)
-     Blobs are stored with a version tag so a replaced server map is re-downloaded.
+     Storage Subsystem
      ========================================================================== */
   const Store = (() => {
     let db = null;
@@ -439,7 +404,6 @@
       t.onerror = t.onabort = () => rej(t.error);
     });
 
-    // A stored blob is valid if no version is requested/stored, or the versions match.
     const okBlob = (r, ver) => (r && (ver == null || r.ver == null || r.ver === ver)) ? r.data : null;
 
     return {
@@ -502,7 +466,6 @@
   let LIB = [];
   async function refreshLib() {
     try { LIB = await Store.all(); } catch (e) { LIB = []; }
-    // Apply difficulty overrides from local storage
     for (const m of LIB) {
       const savedFolder = DiffOverrides.get(m.id);
       if (savedFolder) m.folder = savedFolder;
@@ -513,10 +476,7 @@
   }
 
   /* ==========================================================================
-     Server Maps (public/maps/ -> maps-manifest.json)
-     The manifest is generated at build time (scripts/build-manifest.mjs) and carries
-     each map's metadata, so the lobby is instant and a song is only downloaded when
-     it is first previewed/played (and then cached in IndexedDB).
+     Server Maps
      ========================================================================== */
   const mapUrl = en => 'maps/' + en.file.split('/').map(encodeURIComponent).join('/') + (en.ver ? '?v=' + en.ver : '');
 
@@ -529,7 +489,6 @@
       }
     } catch (e) {}
 
-    // Fallback for plain dev servers that expose a directory listing at /maps/
     try {
       const res = await fetch('maps/');
       if (!res.ok) return null;
@@ -546,7 +505,6 @@
     }
   }
 
-  // URLs (they include the content hash) that failed to parse
   const BadMaps = {
     key: 'rw-bad-maps',
     list() { try { return JSON.parse(localStorage.getItem(this.key) || '[]'); } catch (e) { return []; } },
@@ -579,7 +537,6 @@
             continue;
           }
         } else {
-          // No metadata in the manifest: download + parse once, then remember it.
           prev = LIB.find(m => m.source === 'server' && m.remote === url) || null;
           if (prev) { seen.add(prev.id); continue; }
           if (BadMaps.has(url)) continue;
@@ -589,7 +546,7 @@
           try {
             meta = parseSSPM(buf).meta;
           } catch (e) {
-            BadMaps.add(url); // don't re-download a corrupt file on every visit
+            BadMaps.add(url);
             throw e;
           }
           meta.ver = en.ver;
@@ -602,19 +559,18 @@
         meta.sig = sig;
         meta.folder = DiffOverrides.get(meta.id) || en.folder || classify(meta);
         meta.added = prev ? prev.added : Date.now();
-        if (prev && prev.ver === meta.ver && prev.cv) meta.cv = prev.cv; // blob already cached
+        if (prev && prev.ver === meta.ver && prev.cv) meta.cv = prev.cv;
 
         seen.add(meta.id);
         await Store.putMeta(meta);
         ENT.delete(meta.id);
         changed = true;
       } catch (e) {
-        if (prev) seen.add(prev.id); // don't drop a working map because of a transient error
+        if (prev) seen.add(prev.id);
         console.warn('Skipping map ' + en.file + ':', e.message);
       }
     }
 
-    // Maps that were removed from the server folder disappear from the library.
     for (const m of LIB) {
       if (m.source === 'server' && !seen.has(m.id)) {
         await Store.del(m.id);
@@ -626,7 +582,6 @@
     if (changed) await refreshLib();
   }
 
-  // Download one map (or read it from the cache). Concurrent callers share one request.
   const FETCHING = new Map();
   function fetchBlob(meta) {
     if (FETCHING.has(meta.id)) return FETCHING.get(meta.id);
@@ -647,7 +602,6 @@
     return p;
   }
 
-  // Quietly download every server map in the background so previews start instantly.
   async function prefetchMaps() {
     if (navigator.connection && navigator.connection.saveData) return;
     try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
@@ -734,9 +688,10 @@
   }
 
   /* ==========================================================================
-     Audio Processing Subsystem (Web Audio API)
+     Audio Processing Subsystem & Kick Detector Engine
      ========================================================================== */
   let AC = null, master, analyser, sfx, previewEl, previewGain, freq = new Uint8Array(512), bass = 0;
+  let kickVal = 0, kickEnv = 0;
 
   function initAudio() {
     if (AC) return;
@@ -766,15 +721,30 @@
     previewGain.connect(master);
   }
 
+  // Real-time kick drum & bass onset detection algorithm
   function sampleAudio() {
     if (!analyser) {
       bass *= 0.9;
+      kickVal *= 0.88;
       return;
     }
     analyser.getByteFrequencyData(freq);
-    let b = 0;
-    for (let i = 0; i < 5; i++) b += freq[i];
-    bass = lerp(bass, b / 5 / 255, 0.5);
+    let b = 0, k = 0;
+    // Sub-bass & low bass (low frequencies for kick drum detection)
+    for (let i = 0; i < 4; i++) k += freq[i];
+    for (let i = 0; i < 8; i++) b += freq[i];
+
+    const currentLowEnergy = k / 4 / 255;
+    bass = lerp(bass, b / 8 / 255, 0.5);
+
+    // Onset detection for kick punch
+    const diff = currentLowEnergy - kickEnv;
+    if (diff > 0.14) {
+      kickVal = Math.min(1.0, kickVal + diff * 2.2);
+    } else {
+      kickVal *= 0.88;
+    }
+    kickEnv = lerp(kickEnv, currentLowEnergy, 0.25);
   }
 
   function blip(kind) {
@@ -851,8 +821,23 @@
   }
 
   /* ==========================================================================
-     3D Canvas Engine & Scene Renderer
+     Canvas Manager Engine (WebGL2 via renderer.js with 2D Canvas Fallback)
      ========================================================================== */
+  const WebGLManager = (() => {
+    const instances = new WeakMap();
+
+    function getGL(canvas) {
+      if (!window.PulseGL) return null;
+      if (!instances.has(canvas)) {
+        const instance = window.PulseGL.create(canvas);
+        instances.set(canvas, instance);
+      }
+      return instances.get(canvas);
+    }
+
+    return { getGL };
+  })();
+
   const lowerBound = (a, ms) => {
     let l = 0, h = a.length;
     while (l < h) {
@@ -916,7 +901,36 @@
   ];
   const RZ = [0, 12, 26, ZMAX];
 
-  function drawScene(c, W, H, o) {
+  function drawScene(canvas, c, W, H, o) {
+    const glInstance = WebGLManager.getGL(canvas);
+    
+    // Primary path: Use WebGL2 renderer.js when available
+    if (glInstance && !glInstance.lost) {
+      glInstance.resize(W, H, Math.min(qCap(), devicePixelRatio || 1));
+      glInstance.render({
+        W, H,
+        t: o.t,
+        notes: o.notes,
+        states: o.states,
+        hitAt: o.hitAt,
+        approach: o.approach,
+        cur: o.cursor,
+        trail: o.trail,
+        cam: o.cam || { x: 0, y: 0 },
+        bass: o.bass || bass,
+        kick: kickVal,
+        fx: {
+          glow: !o.lowFx,
+          rings: !o.lowFx,
+          kickRings: true,
+          trail: !!o.trail,
+          kickBg: true
+        }
+      });
+      return;
+    }
+
+    // Secondary fallback path: 2D Canvas Context rendering
     const s0 = Math.min(H * 0.17, W * 0.13);
     o.s0 = s0;
     o.F = s0 * D;
@@ -925,7 +939,7 @@
 
     const cm = o.cam || { x: 0, y: 0 };
     const cu = o.cursor || { x: 0, y: 0 };
-    const bs = o.bass || 0;
+    const bs = o.bass || bass;
     const t = o.t;
     const vz = ZMAX / o.approach;
     const R = 2.7;
@@ -935,8 +949,8 @@
     c.drawImage(layerFor(c, W, H, s0), 0, 0);
     c.restore();
 
-    if (bs > 0.03) {
-      c.globalAlpha = Math.min(0.22, bs * 0.25);
+    if (bs > 0.03 || kickVal > 0.05) {
+      c.globalAlpha = Math.min(0.25, bs * 0.2 + kickVal * 0.15);
       c.fillStyle = '#6a3df0';
       c.fillRect(0, 0, W, H);
     }
@@ -946,9 +960,8 @@
     c.strokeStyle = RAILC;
     c.lineWidth = 1;
 
-    // Draw tunnel rail lines
     for (let k = 0; k < 3; k++) {
-      c.globalAlpha = Math.min(1, (k === 0 ? 0.3 : k === 1 ? 0.16 : 0.07) + bs * (k === 0 ? 0.2 : 0.1));
+      c.globalAlpha = Math.min(1, (k === 0 ? 0.3 : k === 1 ? 0.16 : 0.07) + bs * (k === 0 ? 0.2 : 0.1) + kickVal * 0.1);
       c.beginPath();
       for (let j = 0; j < 8; j++) {
         const p = RAIL[j];
@@ -967,21 +980,20 @@
         const z = k * sp - ph;
         if (z < 0) continue;
         pr(o, 0, 0, z);
-        c.globalAlpha = (1 - z / ZMAX) * (0.28 + bs * 0.3);
+        c.globalAlpha = (1 - z / ZMAX) * (0.28 + bs * 0.3 + kickVal * 0.2);
         c.strokeRect(_px - R * _s, _py - R * _s, 2 * R * _s, 2 * R * _s);
       }
     }
 
-    c.lineWidth = 2;
+    c.lineWidth = 2 + kickVal * 2;
     c.strokeStyle = 'rgb(210,190,255)';
-    c.globalAlpha = Math.min(1, 0.45 + bs * 0.35);
+    c.globalAlpha = Math.min(1, 0.45 + bs * 0.35 + kickVal * 0.25);
     c.strokeRect(o.cx - 1.5 * s0, o.cy - 1.5 * s0, 3 * s0, 3 * s0);
     c.globalAlpha = 1;
 
     o.camX = 0;
     o.camY = 0;
 
-    // Draw Note Blocks
     const N = o.notes;
     if (N && N.length) {
       const lo = lowerBound(N, t - 150);
@@ -1058,7 +1070,6 @@
       c.globalAlpha = 1;
     }
 
-    // Draw Cursor & Motion Trail
     if (o.cursor) {
       const tr = o.trail;
       if (tr) {
@@ -1110,7 +1121,7 @@
   }
 
   /* ==========================================================================
-     Lobby Controllers & Card Leaderboard Hover Preview
+     Lobby Controllers & Hover Preview
      ========================================================================== */
   let screen = 'splash', hov = null, hovTok = 0;
   const lastPick = {};
@@ -1144,16 +1155,15 @@
         chips.insertAdjacentHTML('beforeend', '<li>' + esc(t) + '</li>');
       }
 
-      // Hover leaderboard: show what we know right away, then refresh from the server
-      paintCardBoard(Leaderboard.peek(m.id));
+      paintCardBoard(m.id, Leaderboard.peek(m.id));
       Leaderboard.get(m.id).then(r => {
-        if (hov && hov.meta && hov.meta.id === m.id) paintCardBoard(r.scores);
+        if (hov && hov.meta && hov.meta.id === m.id) paintCardBoard(m.id, r.scores);
       });
     }
     $('#liveTag').textContent = hov && hov.meta ? (hov.entry ? 'PREVIEW' : 'LOADING…') : '';
   }
 
-  function paintCardBoard(scores) {
+  function paintCardBoard(mapId, scores) {
     const box = $('#cardLeaderboard');
     if (scores == null) {
       box.innerHTML = '<div class="card-lb-title">LOADING SCORES…</div>';
@@ -1161,10 +1171,23 @@
       box.innerHTML = '<div class="card-lb-title">NO HIGH SCORES YET</div>';
     } else {
       let html = '<div class="card-lb-title">TOP PLAYERS</div><ol class="card-lb-list">';
-      for (const s of scores.slice(0, 3)) {
-        html += `<li><b>${esc(s.name)}</b> (${esc(s.school)}) - <span>${fmt(s.score)}</span></li>`;
-      }
+      scores.slice(0, 3).forEach((s, idx) => {
+        const hasReplay = !!ReplayStore.get(mapId, idx);
+        const playBtn = hasReplay
+          ? `<button class="btn-play-replay" data-map="${esc(mapId)}" data-rank="${idx}">▶ Watch</button>`
+          : '';
+        html += `<li><b>${esc(s.name)}</b> (${esc(s.school)}) - <span>${fmt(s.score)}</span>${playBtn}</li>`;
+      });
       box.innerHTML = html + '</ol>';
+      
+      box.querySelectorAll('.btn-play-replay').forEach(btn => {
+        btn.onclick = e => {
+          e.stopPropagation();
+          const mId = btn.dataset.map;
+          const rIdx = parseInt(btn.dataset.rank, 10);
+          watchReplay(mId, rIdx);
+        };
+      });
     }
   }
 
@@ -1248,7 +1271,7 @@
 
     if (e && previewEl && !previewEl.paused) {
       const t = previewTime();
-      drawScene(miniX, w, h, {
+      drawScene(miniC, miniX, w, h, {
         t,
         notes: e.notes,
         approach: S.approach,
@@ -1258,7 +1281,7 @@
         lowFx: true
       });
     } else {
-      drawScene(miniX, w, h, {
+      drawScene(miniC, miniX, w, h, {
         t: performance.now(),
         notes: null,
         approach: S.approach,
@@ -1275,7 +1298,7 @@
       bgC.height = Math.round(h * dpr);
     }
     bgX.setTransform(dpr, 0, 0, dpr, 0, 0);
-    drawScene(bgX, w, h, {
+    drawScene(bgC, bgX, w, h, {
       t: performance.now(),
       notes: null,
       approach: 1400,
@@ -1283,6 +1306,116 @@
       lowFx: S.quality === 'low'
     });
   }
+
+  /* ==========================================================================
+     Top 3 Replay Playback Engine
+     ========================================================================== */
+  let activeReplay = null;
+  const replayC = $('#replayCanvas'), replayX = replayC.getContext('2d');
+
+  async function watchReplay(mapId, rankIndex) {
+    const rec = ReplayStore.get(mapId, rankIndex);
+    if (!rec || !rec.replay || !rec.replay.samples || !rec.replay.samples.length) {
+      toast('No replay playback data recorded for this score yet.');
+      return;
+    }
+
+    const meta = LIB.find(m => m.id === mapId);
+    if (!meta) return;
+
+    try {
+      setLoading(true, 'Replay: ' + rec.name);
+      const e = await loadEntry(meta);
+      await decode(e);
+      setLoading(false);
+
+      $('#replayModal').hidden = false;
+      $('#replayTitle').textContent = meta.name;
+      $('#replayMeta').textContent = `Player: ${rec.name} (${rec.school}) · Rank #${rankIndex + 1}`;
+      $('#rpScore').textContent = fmt(rec.score);
+      $('#rpAcc').textContent = (rec.acc || 100).toFixed(2) + '%';
+      $('#rpCombo').textContent = 'x' + (rec.maxCombo || 0);
+
+      if (!e.url) e.url = URL.createObjectURL(new Blob([e.audio.bytes], { type: e.audio.mime }));
+
+      const audio = new Audio(e.url);
+      audio.volume = S.vol;
+      
+      activeReplay = {
+        meta,
+        entry: e,
+        audio,
+        samples: rec.replay.samples,
+        notes: e.notes,
+        states: new Uint8Array(e.notes.length),
+        hitAt: new Float32Array(e.notes.length),
+        startT: performance.now(),
+        dur: meta.dur
+      };
+
+      audio.play().catch(() => {});
+    } catch (err) {
+      setLoading(false);
+      toast('Could not start replay: ' + err.message);
+    }
+  }
+
+  function sampleReplayCursor(samples, tMs) {
+    if (!samples.length) return { x: 0, y: 0 };
+    if (tMs <= samples[0].t) return { x: samples[0].x, y: samples[0].y };
+    if (tMs >= samples[samples.length - 1].t) return { x: samples[samples.length - 1].x, y: samples[samples.length - 1].y };
+
+    let l = 0, h = samples.length - 1;
+    while (l <= h) {
+      const m = (l + h) >> 1;
+      if (samples[m].t < tMs) l = m + 1;
+      else h = m - 1;
+    }
+    const idx = Math.max(1, l);
+    const p0 = samples[idx - 1], p1 = samples[idx];
+    const u = clamp((tMs - p0.t) / Math.max(1, p1.t - p0.t), 0, 1);
+    return { x: lerp(p0.x, p1.x, u), y: lerp(p0.y, p1.y, u) };
+  }
+
+  function drawReplayFrame() {
+    if (!activeReplay || $('#replayModal').hidden) return;
+    const sz = fitCanvas(replayC, Math.min(qCap(), devicePixelRatio || 1));
+    if (!sz) return;
+    const [w, h] = sz, dpr = replayC.width / w;
+    replayX.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    const r = activeReplay;
+    const ct = r.audio ? r.audio.currentTime * 1000 : (performance.now() - r.startT);
+    const cur = sampleReplayCursor(r.samples, ct);
+
+    drawScene(replayC, replayX, w, h, {
+      t: ct,
+      notes: r.notes,
+      states: r.states,
+      hitAt: r.hitAt,
+      approach: S.approach,
+      bass,
+      cursor: cur,
+      trail: null,
+      lowFx: false
+    });
+
+    if (r.audio && r.audio.ended) {
+      stopReplay();
+    }
+  }
+
+  function stopReplay() {
+    if (activeReplay) {
+      if (activeReplay.audio) {
+        try { activeReplay.audio.pause(); } catch (e) {}
+      }
+      activeReplay = null;
+    }
+    $('#replayModal').hidden = true;
+  }
+
+  $('#replayClose').onclick = stopReplay;
 
   /* ==========================================================================
      Open House Player Modal Prompt
@@ -1424,6 +1557,7 @@
       hp: HPMAX,
       cur: { x: 0, y: 0 },
       trail: [],
+      replaySamples: [], // Recording player inputs for replay functionality
       paused: false,
       pausedT: 0,
       over: false,
@@ -1549,16 +1683,14 @@
     g.cdStart = performance.now();
   }
 
-  // Hit Detection & Logic Judge
   function judge(t) {
     const N = g.notes, st = g.states;
     for (let i = g.lo; i < g.N; i++) {
       const n = N[i];
       if (st[i] !== 0) continue;
 
-      // Restrict note processing if it exceeds max late time (MAX_LATE_TIME = 70ms)
       if (t > n.ms + MAX_LATE_TIME) {
-        st[i] = 2; // Miss
+        st[i] = 2;
         g.misses++;
         g.combo = 0;
         g.hp -= HP_MISS;
@@ -1592,6 +1724,9 @@
     judge(t);
     g.trail.push({ x: g.cur.x, y: g.cur.y });
     if (g.trail.length > 9) g.trail.shift();
+
+    // Sample player input trajectory for replay playback
+    g.replaySamples.push({ t: Math.round(t), x: Number(g.cur.x.toFixed(3)), y: Number(g.cur.y.toFixed(3)) });
 
     if (g.hp <= 0) {
       g.hp = 0;
@@ -1640,12 +1775,11 @@
       lowFx: S.quality === 'low'
     };
 
-    drawScene(cx, gW, gH, o);
+    drawScene(cv, cx, gW, gH, o);
     g.s0 = o.s0;
     drawHUD(cx, gW, gH, t);
   }
 
-  // Draw HUD Overlay Elements
   function drawHUD(c, W, H, t) {
     const pad = Math.max(16, W * 0.025);
     const big = Math.round(clamp(W * 0.032, 20, 38));
@@ -1673,7 +1807,6 @@
     c.fillText(g.meta.name.length > 44 ? g.meta.name.slice(0, 43) + '…' : g.meta.name, W - pad, pad + big * 0.6);
     c.fillText('ESC pause', W - pad, pad + big * 1.3);
 
-    // Health Bar
     const bw = Math.min(W * 0.34, 420);
     const bx = (W - bw) / 2;
     const by = H - pad - 10;
@@ -1684,7 +1817,6 @@
     c.fillStyle = pct < 0.34 ? '#ff3d71' : pct < 0.6 ? '#ffa53d' : '#3ddc97';
     c.fillRect(bx, by, bw * pct, 8);
 
-    // Combo Tracker
     if (g.combo > 1) {
       const pop = clamp(1 - (t - g.lastHit) / 120, 0, 1);
       c.textAlign = 'center';
@@ -1693,7 +1825,6 @@
       c.fillText(g.combo, W / 2, H - pad - 34);
     }
 
-    // Damage Effect Flash
     const mf = 1 - (performance.now() - g.lastMiss) / 350;
     if (mf > 0) {
       const gr = c.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.max(W, H) * 0.75);
@@ -1703,7 +1834,6 @@
       c.fillRect(0, 0, W, H);
     }
 
-    // Intro Title Card
     if (t < 0) {
       const a = clamp(1 + t / 600, 0, 1) * clamp((-t) / 400, 0, 1);
       c.textAlign = 'center';
@@ -1716,7 +1846,6 @@
       c.fillText('mapped by ' + g.meta.mapper, W / 2, H * 0.2 + big * 0.9);
     }
 
-    // Countdown Text
     if (g.countdown > 0) {
       const left = 3 - Math.floor((performance.now() - g.cdStart) / 1000);
       c.textAlign = 'center';
@@ -1808,7 +1937,7 @@
     }
     el.textContent = 'Submitting score…';
 
-    const r = await Leaderboard.submit(gg.meta.id, {
+    const entryData = {
       name: currentPlayer.name,
       school: currentPlayer.school,
       score: gg.score,
@@ -1819,8 +1948,13 @@
       grade,
       cleared: win,
       progress: Math.floor(prog)
-    });
-    if (g !== gg) return; // player already left the results screen
+    };
+
+    // Save replay locally for Top 3 watching feature
+    ReplayStore.save(gg.meta.id, entryData, { samples: gg.replaySamples });
+
+    const r = await Leaderboard.submit(gg.meta.id, entryData);
+    if (g !== gg) return;
 
     if (r.error) {
       el.textContent = 'Score not saved: ' + r.error;
@@ -1901,7 +2035,6 @@
     refreshLib();
   }
 
-  // Event Handlers for Navigation Controls
   $('#btnBack').onclick = toLobby;
   $('#btnReplay').onclick = () => { const m = g.meta; g.over = true; startGame(m); };
   $('#pResume').onclick = resumeGame;
@@ -1917,7 +2050,6 @@
     renderLeaderboardModal(mapId);
     $('#leaderboardModal').hidden = false;
     clearInterval(lbTimer);
-    // live refresh while the board is on screen (handy on a shared open-house display)
     lbTimer = setInterval(() => {
       if ($('#leaderboardModal').hidden) return clearInterval(lbTimer);
       updateLeaderboardView($('#lbMapSelect').value, true);
@@ -1961,7 +2093,7 @@
     if (cached == null) listEl.innerHTML = '<div class="empty">Loading scores…</div>';
 
     const { scores, offline } = await Leaderboard.get(mapId, force);
-    if (tok !== lbTok) return; // a newer request replaced this one
+    if (tok !== lbTok) return;
 
     const note = offline ? '<div class="empty">Server unreachable. Showing the last known scores.</div>' : '';
     if (!scores.length) {
@@ -1972,12 +2104,17 @@
     const me = (currentPlayer.name + '|' + currentPlayer.school).toLowerCase();
     let html = note + `<table class="lb-table">
       <thead>
-        <tr><th>#</th><th>Player</th><th>School</th><th>Score</th><th>Acc</th><th>Combo</th><th>Grade</th></tr>
+        <tr><th>#</th><th>Player</th><th>School</th><th>Score</th><th>Acc</th><th>Combo</th><th>Grade</th><th>Replay</th></tr>
       </thead>
       <tbody>`;
 
     scores.forEach((s, idx) => {
       const mine = (s.name + '|' + s.school).toLowerCase() === me;
+      const hasReplay = idx < 3 && !!ReplayStore.get(mapId, idx);
+      const replayBtn = hasReplay
+        ? `<button class="btn-play-replay" data-map="${esc(mapId)}" data-rank="${idx}">▶ Watch</button>`
+        : '-';
+
       html += `<tr class="${mine ? 'me' : ''}">
         <td>${idx + 1}</td>
         <td><b>${esc(s.name)}</b></td>
@@ -1986,16 +2123,25 @@
         <td>${Number(s.acc).toFixed(2)}%</td>
         <td>x${s.maxCombo}</td>
         <td>${esc(s.grade || '-')}${s.cleared === false ? ' <small>(failed)</small>' : ''}</td>
+        <td>${replayBtn}</td>
       </tr>`;
     });
 
     listEl.innerHTML = html + '</tbody></table>';
+
+    listEl.querySelectorAll('.btn-play-replay').forEach(btn => {
+      btn.onclick = e => {
+        e.stopPropagation();
+        const mId = btn.dataset.map;
+        const rIdx = parseInt(btn.dataset.rank, 10);
+        watchReplay(mId, rIdx);
+      };
+    });
   }
 
   $('#lbMapSelect').onchange = e => updateLeaderboardView(e.target.value, true);
   $('#btnLeaderboard').onclick = () => openLeaderboard(hov && hov.meta ? hov.meta.id : null);
   $('#btnResLeaderboard').onclick = () => {
-    // stop the auto-return countdown so the player can read the board in peace
     clearInterval(backTimer);
     $('#btnBack').textContent = 'Back';
     openLeaderboard(g && g.meta ? g.meta.id : null);
@@ -2074,11 +2220,12 @@
   $('#btnSet').onclick = () => $('#settings').hidden = false;
   $('#setClose').onclick = () => $('#settings').hidden = true;
 
-  for (const o of [$('#library'), $('#settings'), $('#leaderboardModal'), $('#playerModal')]) {
+  for (const o of [$('#library'), $('#settings'), $('#leaderboardModal'), $('#playerModal'), $('#replayModal')]) {
     o.addEventListener('pointerdown', e => {
       if (e.target === o && o.id !== 'playerModal') {
         o.hidden = true;
         if (o.id === 'leaderboardModal') clearInterval(lbTimer);
+        if (o.id === 'replayModal') stopReplay();
       }
     });
   }
@@ -2165,7 +2312,7 @@
     requestAnimationFrame(loop);
     tick++;
     if (screen === 'game' && g) {
-      if (!(tick & 1)) sampleAudio();
+      sampleAudio();
       gameFrame();
     } else {
       sampleAudio();
@@ -2173,16 +2320,17 @@
       if (screen === 'lobby') {
         drawViz();
         drawMini();
+        drawReplayFrame();
       }
     }
   }
 
   renderCard();
   Store.ready.then(async () => {
-    await refreshLib();       // instant: whatever is cached from last visit
-    await syncServerMaps();   // then pick up new/changed/removed maps from /maps/
-    Leaderboard.flush();      // upload any scores saved while offline
-    prefetchMaps();           // warm the cache in the background
+    await refreshLib();
+    await syncServerMaps();
+    Leaderboard.flush();
+    prefetchMaps();
   });
   requestAnimationFrame(loop);
 
