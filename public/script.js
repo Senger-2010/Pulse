@@ -64,7 +64,7 @@
   // Playfield Rendering Constants
   const D = 3.4;
   const ZMAX = 46;
-  const NOTE = 1;
+  const NOTE = 0.88;
   const CUR = 0.2;
   const CLAMP = 1.45;
   const HPMAX = 5;
