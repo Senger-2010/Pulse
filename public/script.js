@@ -74,97 +74,185 @@
   const COLS = ['255,61,113', '53,214,255'];
 
   /* ==========================================================================
-     Leaderboard & Open House Player Identity Subsystem
+     Leaderboard (stored on the server via the Netlify Function /api/scores,
+     with a local cache + retry queue so the game still works offline)
      ========================================================================== */
   let currentPlayer = {
     name: localStorage.getItem('oh-player-name') || '',
     school: localStorage.getItem('oh-player-school') || ''
   };
 
-  const Leaderboard = {
-    getStore() {
+  const Leaderboard = (() => {
+    const API = '/api/scores';
+    const CACHE_KEY = 'rw-lb-cache';
+    const PENDING_KEY = 'rw-lb-pending';
+    const TTL = 15000;
+    const mem = new Map(); // mapId -> { t, scores }
+    let flushing = false;
+
+    const readLS = (k, d) => {
+      try { const v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch (e) { return d; }
+    };
+    const writeLS = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
+    const pkey = e => (e.name + '|' + e.school).toLowerCase();
+
+    const remember = (mapId, scores) => {
+      mem.set(mapId, { t: Date.now(), scores });
+      const c = readLS(CACHE_KEY, {});
+      c[mapId] = scores;
+      writeLS(CACHE_KEY, c);
+    };
+
+    async function request(url, opts = {}) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 8000);
       try {
-        return JSON.parse(localStorage.getItem('rw-leaderboards') || '{}');
-      } catch (e) {
-        return {};
-      }
-    },
-    saveStore(store) {
-      try {
-        localStorage.setItem('rw-leaderboards', JSON.stringify(store));
-      } catch (e) {}
-    },
-    getAll(mapId) {
-      const store = this.getStore();
-      return store[mapId] || [];
-    },
-    saveScore(mapId, entry) {
-      const store = this.getStore();
-      if (!store[mapId]) store[mapId] = [];
-      store[mapId].push({
-        name: entry.name || 'Anonymous',
-        school: entry.school || 'Unknown',
-        score: entry.score,
-        acc: entry.acc,
-        maxCombo: entry.maxCombo,
-        date: new Date().toLocaleDateString()
-      });
-      store[mapId].sort((a, b) => b.score - a.score || b.acc - a.acc);
-      store[mapId] = store[mapId].slice(0, 10); // Top 10
-      this.saveStore(store);
-    },
-    clearAll() {
-      localStorage.removeItem('rw-leaderboards');
-      console.log('Leaderboard fully cleared.');
-    },
-    deleteByName(nameStr) {
-      const store = this.getStore();
-      const lower = nameStr.toLowerCase();
-      let count = 0;
-      for (const mapId in store) {
-        const origLen = store[mapId].length;
-        store[mapId] = store[mapId].filter(e => e.name.toLowerCase() !== lower);
-        count += (origLen - store[mapId].length);
-      }
-      this.saveStore(store);
-      console.log(`Deleted ${count} score entries for player "${nameStr}".`);
-    },
-    deleteByMap(mapIdOrName) {
-      const store = this.getStore();
-      const lower = mapIdOrName.toLowerCase();
-      let targetKey = null;
-      if (store[mapIdOrName]) {
-        targetKey = mapIdOrName;
-      } else {
-        const foundMeta = LIB.find(m => m.id.toLowerCase() === lower || m.name.toLowerCase() === lower);
-        if (foundMeta) targetKey = foundMeta.id;
-      }
-      if (targetKey && store[targetKey]) {
-        delete store[targetKey];
-        this.saveStore(store);
-        console.log(`Cleared leaderboard entries for map "${mapIdOrName}".`);
-      } else {
-        console.warn(`Map "${mapIdOrName}" not found in leaderboard store.`);
+        const res = await fetch(url, { ...opts, signal: ctrl.signal });
+        let data = null;
+        try { data = await res.json(); } catch (e) {}
+        if (!res.ok || !data) {
+          const err = new Error((data && data.error) || 'HTTP ' + res.status);
+          err.status = res.status;
+          throw err;
+        }
+        return data;
+      } finally {
+        clearTimeout(timer);
       }
     }
-  };
 
-  // Exposed Console Command for Debugging Leaderboard
-  window.rwLeaderboard = {
-    clear() { Leaderboard.clearAll(); },
-    deleteName(name) { Leaderboard.deleteByName(name); },
-    deleteMap(map) { Leaderboard.deleteByMap(map); },
-    delete(arg) {
-      if (!arg || arg === '--clear') {
-        Leaderboard.clearAll();
-      } else {
-        const store = Leaderboard.getStore();
-        if (store[arg] || LIB.some(m => m.id === arg || m.name.toLowerCase() === arg.toLowerCase())) {
-          Leaderboard.deleteByMap(arg);
-        } else {
-          Leaderboard.deleteByName(arg);
-        }
+    const post = payload => request(API, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    // Network problems, a missing API (404) and 5xx are worth retrying later.
+    const retryable = err => !err.status || err.status === 404 || err.status >= 500;
+
+    // Merge an entry into a cached list the same way the server does.
+    function mergeLocal(list, entry) {
+      const k = pkey(entry);
+      const prev = list.find(e => pkey(e) === k);
+      let next = list;
+      if (!prev || prev.score < entry.score) {
+        next = list.filter(e => pkey(e) !== k).concat(entry);
+        next.sort((a, b) => b.score - a.score || b.acc - a.acc);
       }
+      return { list: next.slice(0, 50), rank: next.findIndex(e => pkey(e) === k) + 1 };
+    }
+
+    return {
+      // Last known scores for a map, or null if we've never seen any.
+      peek(mapId) {
+        const m = mem.get(mapId);
+        if (m) return m.scores;
+        return readLS(CACHE_KEY, {})[mapId] || null;
+      },
+
+      async get(mapId, force = false) {
+        const m = mem.get(mapId);
+        if (m && !force && Date.now() - m.t < TTL) return { scores: m.scores, offline: false };
+        try {
+          const data = await request(API + '?map=' + encodeURIComponent(mapId) + '&limit=10');
+          remember(mapId, data.scores || []);
+          this.flush();
+          return { scores: data.scores || [], offline: false };
+        } catch (e) {
+          return { scores: this.peek(mapId) || [], offline: true };
+        }
+      },
+
+      async submit(mapId, entry) {
+        const payload = { mapId, ...entry };
+        try {
+          const data = await post(payload);
+          if (data.scores) remember(mapId, data.scores);
+          this.flush();
+          return data;
+        } catch (err) {
+          if (!retryable(err)) return { error: err.message };
+          const q = readLS(PENDING_KEY, []);
+          q.push(payload);
+          writeLS(PENDING_KEY, q.slice(-20));
+          const local = mergeLocal(this.peek(mapId) || [], { ...entry, ts: Date.now() });
+          remember(mapId, local.list);
+          return { ranked: true, offline: true, rank: local.rank, scores: local.list };
+        }
+      },
+
+      // Upload scores that were saved while the server was unreachable.
+      async flush() {
+        if (flushing) return;
+        flushing = true;
+        try {
+          let q = readLS(PENDING_KEY, []);
+          while (q.length) {
+            try {
+              await post(q[0]);
+            } catch (err) {
+              if (retryable(err)) break; // still offline, try again later
+            }
+            q = q.slice(1); // sent, or rejected for good
+            writeLS(PENDING_KEY, q);
+          }
+        } finally {
+          flushing = false;
+        }
+      },
+
+      adminKey() {
+        try { return sessionStorage.getItem('rw-admin-key') || ''; } catch (e) { return ''; }
+      },
+
+      async admin(params) {
+        const qs = new URLSearchParams(params).toString();
+        const data = await request(API + '?' + qs, {
+          method: 'DELETE',
+          headers: { 'x-admin-key': this.adminKey() }
+        });
+        mem.clear();
+        writeLS(CACHE_KEY, {});
+        return data;
+      }
+    };
+  })();
+
+  // Console tools for the organiser:
+  //   rwLeaderboard.setKey('your ADMIN_KEY')
+  //   rwLeaderboard.clearMap('Map name or id')   rwLeaderboard.deleteName('Alex')
+  //   rwLeaderboard.deleteEntry('Map name or id', 'Alex', 'School')   rwLeaderboard.clearAll()
+  const resolveMapId = x => {
+    const lower = String(x).toLowerCase();
+    const m = LIB.find(m => m.id === x || m.name.toLowerCase() === lower);
+    return m ? m.id : x;
+  };
+  const adminLog = p => p.then(r => console.log('Done:', r), e => console.warn('Failed:', e.message));
+
+  window.rwLeaderboard = {
+    setKey(k) {
+      try { sessionStorage.setItem('rw-admin-key', k); } catch (e) {}
+      console.log('Admin key saved for this tab.');
+    },
+    clearMap(map) { return adminLog(Leaderboard.admin({ map: resolveMapId(map) })); },
+    deleteName(name, school) {
+      const q = { name };
+      if (school) q.school = school;
+      return adminLog(Leaderboard.admin(q));
+    },
+    deleteEntry(map, name, school) {
+      const q = { map: resolveMapId(map), name };
+      if (school) q.school = school;
+      return adminLog(Leaderboard.admin(q));
+    },
+    clearAll() { return adminLog(Leaderboard.admin({ all: 1 })); },
+    // kept for backwards compatibility with the old console commands
+    clear() { return this.clearAll(); },
+    deleteMap(map) { return this.clearMap(map); },
+    delete(arg) {
+      if (!arg || arg === '--clear') return this.clearAll();
+      if (LIB.some(m => m.id === arg || m.name.toLowerCase() === String(arg).toLowerCase())) return this.clearMap(arg);
+      return this.deleteName(arg);
     }
   };
 
@@ -325,6 +413,7 @@
 
   /* ==========================================================================
      Storage Subsystem (IndexedDB with Memory Fallback)
+     Blobs are stored with a version tag so a replaced server map is re-downloaded.
      ========================================================================== */
   const Store = (() => {
     let db = null;
@@ -350,6 +439,9 @@
       t.onerror = t.onabort = () => rej(t.error);
     });
 
+    // A stored blob is valid if no version is requested/stored, or the versions match.
+    const okBlob = (r, ver) => (r && (ver == null || r.ver == null || r.ver === ver)) ? r.data : null;
+
     return {
       ready,
       async all() {
@@ -360,22 +452,31 @@
         for (const m of mem.meta.values()) if (!ids.has(m.id)) a.push(m);
         return a;
       },
-      async getBlob(id) {
+      async getBlob(id, ver) {
         await ready;
-        if (mem.blob.has(id)) return mem.blob.get(id);
+        const d = okBlob(mem.blob.get(id), ver);
+        if (d) return d;
         try {
-          const r = await tx('blob', 'readonly', s => s.get(id));
-          return r && r.data;
+          return okBlob(await tx('blob', 'readonly', s => s.get(id)), ver);
         } catch (e) { return null; }
+      },
+      async putBlob(id, data, ver) {
+        await ready;
+        try {
+          await tx('blob', 'readwrite', s => s.put({ id, data, ver }));
+          mem.blob.delete(id);
+        } catch (e) {
+          mem.blob.set(id, { data, ver });
+        }
       },
       async put(meta, data) {
         await ready;
         try {
-          await tx('blob', 'readwrite', s => s.put({ id: meta.id, data }));
+          await tx('blob', 'readwrite', s => s.put({ id: meta.id, data, ver: meta.ver }));
           await tx('meta', 'readwrite', s => s.put(meta));
         } catch (e) {
           mem.meta.set(meta.id, meta);
-          mem.blob.set(meta.id, data);
+          mem.blob.set(meta.id, { data, ver: meta.ver });
         }
       },
       async putMeta(meta) {
@@ -384,7 +485,7 @@
           mem.meta.set(meta.id, meta);
           return;
         }
-        try { await tx('meta', 'readwrite', s => s.put(meta)); } catch (e) {}
+        try { await tx('meta', 'readwrite', s => s.put(meta)); } catch (e) { mem.meta.set(meta.id, meta); }
       },
       async del(id) {
         await ready;
@@ -412,42 +513,149 @@
   }
 
   /* ==========================================================================
-     Direct /maps/ Folder Auto-Loader (No JSON required)
+     Server Maps (public/maps/ -> maps-manifest.json)
+     The manifest is generated at build time (scripts/build-manifest.mjs) and carries
+     each map's metadata, so the lobby is instant and a song is only downloaded when
+     it is first previewed/played (and then cached in IndexedDB).
      ========================================================================== */
-  async function loadMapsFromMapsFolder() {
+  const mapUrl = en => 'maps/' + en.file.split('/').map(encodeURIComponent).join('/') + (en.ver ? '?v=' + en.ver : '');
+
+  async function fetchManifest() {
+    try {
+      const res = await fetch('maps-manifest.json', { cache: 'no-cache' });
+      if (res.ok) {
+        const j = await res.json();
+        if (j && Array.isArray(j.maps)) return j.maps;
+      }
+    } catch (e) {}
+
+    // Fallback for plain dev servers that expose a directory listing at /maps/
     try {
       const res = await fetch('maps/');
-      if (!res.ok) return;
+      if (!res.ok) return null;
       const text = await res.text();
       const matches = text.match(/href=["']([^"']+\.sspm)["']/gi);
-      if (!matches) return;
-
-      const filesToFetch = matches.map(m => {
+      if (!matches) return null;
+      const files = matches.map(m => {
         const raw = m.replace(/href=["']/i, '').replace(/["']$/, '');
-        const parts = raw.split('/');
-        return parts[parts.length - 1];
+        return decodeURIComponent(raw.split('/').pop());
       });
+      return [...new Set(files)].map(file => ({ file }));
+    } catch (e) {
+      return null;
+    }
+  }
 
-      const uniqueFiles = [...new Set(filesToFetch)];
+  // URLs (they include the content hash) that failed to parse
+  const BadMaps = {
+    key: 'rw-bad-maps',
+    list() { try { return JSON.parse(localStorage.getItem(this.key) || '[]'); } catch (e) { return []; } },
+    has(url) { return this.list().includes(url); },
+    add(url) {
+      try { localStorage.setItem(this.key, JSON.stringify([...new Set([...this.list(), url])].slice(-50))); } catch (e) {}
+    }
+  };
 
-      for (const fileRef of uniqueFiles) {
-        try {
-          const path = `maps/${fileRef}`;
-          const mRes = await fetch(path);
-          if (!mRes.ok) continue;
-          const buf = await mRes.arrayBuffer();
-          const p = parseSSPM(buf);
-          const meta = p.meta;
+  async function syncServerMaps() {
+    const entries = await fetchManifest();
+    if (!entries) return;
 
-          const savedFolder = DiffOverrides.get(meta.id);
-          meta.folder = savedFolder || classify(meta);
-          meta.added = Date.now();
+    const known = new Map(LIB.map(m => [m.id, m]));
+    const seen = new Set();
+    let changed = false;
 
-          await Store.put(meta, buf);
-        } catch (e) {}
+    for (const en of entries) {
+      if (!en || !en.file) continue;
+      const url = mapUrl(en);
+      const sig = (en.ver || '') + '|' + (en.folder || '');
+      let prev = null;
+      try {
+        let meta = en.meta ? { ...en.meta, ver: en.ver } : null;
+
+        if (meta) {
+          prev = known.get(meta.id) || null;
+          if (prev && prev.source === 'server' && prev.sig === sig && prev.remote === url) {
+            seen.add(meta.id);
+            continue;
+          }
+        } else {
+          // No metadata in the manifest: download + parse once, then remember it.
+          prev = LIB.find(m => m.source === 'server' && m.remote === url) || null;
+          if (prev) { seen.add(prev.id); continue; }
+          if (BadMaps.has(url)) continue;
+          const res = await fetch(url);
+          if (!res.ok) continue;
+          const buf = await res.arrayBuffer();
+          try {
+            meta = parseSSPM(buf).meta;
+          } catch (e) {
+            BadMaps.add(url); // don't re-download a corrupt file on every visit
+            throw e;
+          }
+          meta.ver = en.ver;
+          await Store.putBlob(meta.id, buf, meta.ver);
+          meta.cv = meta.ver;
+        }
+
+        meta.source = 'server';
+        meta.remote = url;
+        meta.sig = sig;
+        meta.folder = DiffOverrides.get(meta.id) || en.folder || classify(meta);
+        meta.added = prev ? prev.added : Date.now();
+        if (prev && prev.ver === meta.ver && prev.cv) meta.cv = prev.cv; // blob already cached
+
+        seen.add(meta.id);
+        await Store.putMeta(meta);
+        ENT.delete(meta.id);
+        changed = true;
+      } catch (e) {
+        if (prev) seen.add(prev.id); // don't drop a working map because of a transient error
+        console.warn('Skipping map ' + en.file + ':', e.message);
       }
-      await refreshLib();
-    } catch (e) {}
+    }
+
+    // Maps that were removed from the server folder disappear from the library.
+    for (const m of LIB) {
+      if (m.source === 'server' && !seen.has(m.id)) {
+        await Store.del(m.id);
+        ENT.delete(m.id);
+        changed = true;
+      }
+    }
+
+    if (changed) await refreshLib();
+  }
+
+  // Download one map (or read it from the cache). Concurrent callers share one request.
+  const FETCHING = new Map();
+  function fetchBlob(meta) {
+    if (FETCHING.has(meta.id)) return FETCHING.get(meta.id);
+    const p = (async () => {
+      const cached = await Store.getBlob(meta.id, meta.ver);
+      if (cached) return cached;
+      if (!meta.remote) return null;
+      const res = await fetch(meta.remote);
+      if (!res.ok) throw new Error('Could not download map (HTTP ' + res.status + ')');
+      const buf = await res.arrayBuffer();
+      await Store.putBlob(meta.id, buf, meta.ver);
+      meta.cv = meta.ver;
+      Store.putMeta(meta);
+      return buf;
+    })();
+    FETCHING.set(meta.id, p);
+    p.finally(() => FETCHING.delete(meta.id)).catch(() => {});
+    return p;
+  }
+
+  // Quietly download every server map in the background so previews start instantly.
+  async function prefetchMaps() {
+    if (navigator.connection && navigator.connection.saveData) return;
+    try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
+    for (const m of LIB.slice()) {
+      if (!m.remote || m.cv === m.ver) continue;
+      try { await fetchBlob(m); } catch (e) {}
+      await new Promise(r => setTimeout(r, 200));
+    }
   }
 
   function renderCounts() {
@@ -501,7 +709,7 @@
       return e;
     }
 
-    const buf = await Store.getBlob(meta.id);
+    const buf = await fetchBlob(meta);
     if (!buf) throw new Error('Map data is missing');
 
     const p = parseSSPM(buf);
@@ -936,20 +1144,28 @@
         chips.insertAdjacentHTML('beforeend', '<li>' + esc(t) + '</li>');
       }
 
-      // Render Hover Map Leaderboard
-      const scores = Leaderboard.getAll(m.id).slice(0, 3);
-      if (scores.length) {
-        let html = '<div class="card-lb-title">TOP PLAYERS</div><ol class="card-lb-list">';
-        scores.forEach(s => {
-          html += `<li><b>${esc(s.name)}</b> (${esc(s.school)}) - <span>${fmt(s.score)}</span></li>`;
-        });
-        html += '</ol>';
-        lbBox.innerHTML = html;
-      } else {
-        lbBox.innerHTML = '<div class="card-lb-title">NO HIGH SCORES YET</div>';
-      }
+      // Hover leaderboard: show what we know right away, then refresh from the server
+      paintCardBoard(Leaderboard.peek(m.id));
+      Leaderboard.get(m.id).then(r => {
+        if (hov && hov.meta && hov.meta.id === m.id) paintCardBoard(r.scores);
+      });
     }
-    $('#liveTag').textContent = hov && hov.meta ? 'PREVIEW' : '';
+    $('#liveTag').textContent = hov && hov.meta ? (hov.entry ? 'PREVIEW' : 'LOADING…') : '';
+  }
+
+  function paintCardBoard(scores) {
+    const box = $('#cardLeaderboard');
+    if (scores == null) {
+      box.innerHTML = '<div class="card-lb-title">LOADING SCORES…</div>';
+    } else if (!scores.length) {
+      box.innerHTML = '<div class="card-lb-title">NO HIGH SCORES YET</div>';
+    } else {
+      let html = '<div class="card-lb-title">TOP PLAYERS</div><ol class="card-lb-list">';
+      for (const s of scores.slice(0, 3)) {
+        html += `<li><b>${esc(s.name)}</b> (${esc(s.school)}) - <span>${fmt(s.score)}</span></li>`;
+      }
+      box.innerHTML = html + '</ol>';
+    }
   }
 
   function hoverFolder(key) {
@@ -972,6 +1188,7 @@
     loadEntry(meta).then(e => {
       if (tok !== hovTok) return;
       hov.entry = e;
+      $('#liveTag').textContent = 'PREVIEW';
       startPreview(e);
       setTimeout(() => {
         if (tok === hovTok) decode(e).catch(() => {});
@@ -1077,6 +1294,14 @@
     $('#pName').value = currentPlayer.name;
     $('#pSchool').value = currentPlayer.school;
     $('#playerModal').hidden = false;
+    setTimeout(() => ($('#pName').value ? $('#pSchool') : $('#pName')).focus(), 0);
+  }
+
+  for (const sel of ['#pName', '#pSchool']) {
+    $(sel).addEventListener('keydown', e => {
+      if (e.key === 'Enter') $('#btnStartGame').click();
+      else if (e.key === 'Escape') $('#btnCancelPlayer').click();
+    });
   }
 
   $('#btnStartGame').onclick = () => {
@@ -1526,15 +1751,6 @@
     const acc = done ? g.hits / done * 100 : 0;
     const prog = win ? 100 : clamp(t / g.lastMs * 100, 0, 99);
 
-    // Record Score to Leaderboard
-    Leaderboard.saveScore(g.meta.id, {
-      name: currentPlayer.name,
-      school: currentPlayer.school,
-      score: g.score,
-      acc,
-      maxCombo: g.maxCombo
-    });
-
     let grade = 'F', gc = '#ff3d71';
     if (win) {
       if (g.misses === 0) { grade = 'SS'; gc = '#ffd34a'; }
@@ -1565,8 +1781,10 @@
     $('#results').hidden = false;
 
     drawTimeline();
+    submitScore(g, win, acc, grade, prog);
 
     let n = 15;
+    $('#btnBack').innerHTML = 'Back (<span id="backCount">15</span>)';
     $('#backCount').textContent = n;
     clearInterval(backTimer);
     backTimer = setInterval(() => {
@@ -1577,6 +1795,49 @@
         toLobby();
       }
     }, 1000);
+  }
+
+  async function submitScore(gg, win, acc, grade, prog) {
+    const el = $('#resRank');
+    el.hidden = false;
+    el.className = 'rank-line';
+
+    if (gg.auto) {
+      el.textContent = 'Auto-play run, not submitted.';
+      return;
+    }
+    el.textContent = 'Submitting score…';
+
+    const r = await Leaderboard.submit(gg.meta.id, {
+      name: currentPlayer.name,
+      school: currentPlayer.school,
+      score: gg.score,
+      acc: Math.round(acc * 100) / 100,
+      maxCombo: gg.maxCombo,
+      hits: gg.hits,
+      misses: gg.misses,
+      grade,
+      cleared: win,
+      progress: Math.floor(prog)
+    });
+    if (g !== gg) return; // player already left the results screen
+
+    if (r.error) {
+      el.textContent = 'Score not saved: ' + r.error;
+      el.classList.add('bad');
+    } else if (r.ranked === false) {
+      el.textContent = 'Imported maps are not ranked. Only maps on the server have a leaderboard.';
+    } else if (r.offline) {
+      el.textContent = 'Server unreachable. Score saved and will upload automatically.';
+      el.classList.add('warn');
+    } else if (!r.rank) {
+      el.textContent = 'Not in the top 50 for this map yet.';
+    } else if (r.improved) {
+      el.textContent = 'Rank #' + r.rank + ' · new personal best!';
+      el.classList.add('good');
+    } else {
+      el.textContent = 'Rank #' + r.rank + ' · your best here is ' + fmt(r.best);
+    }
   }
 
   function drawTimeline() {
@@ -1650,6 +1911,19 @@
   /* ==========================================================================
      Leaderboard Modal Rendering & Controls
      ========================================================================== */
+  let lbTok = 0, lbTimer = null;
+
+  function openLeaderboard(mapId) {
+    renderLeaderboardModal(mapId);
+    $('#leaderboardModal').hidden = false;
+    clearInterval(lbTimer);
+    // live refresh while the board is on screen (handy on a shared open-house display)
+    lbTimer = setInterval(() => {
+      if ($('#leaderboardModal').hidden) return clearInterval(lbTimer);
+      updateLeaderboardView($('#lbMapSelect').value, true);
+    }, 10000);
+  }
+
   function renderLeaderboardModal(selectedMapId = null) {
     const mapSelect = $('#lbMapSelect');
     mapSelect.innerHTML = '';
@@ -1660,72 +1934,73 @@
       return;
     }
 
-    LIB.forEach(m => {
-      const op = document.createElement('option');
-      op.value = m.id;
-      op.textContent = `[${FOLDER[m.folder]?.label || m.folder}] ${m.name}`;
-      mapSelect.appendChild(op);
-    });
-
-    if (selectedMapId && LIB.some(m => m.id === selectedMapId)) {
-      mapSelect.value = selectedMapId;
-    } else {
-      mapSelect.value = LIB[0].id;
+    for (const f of FOLDERS) {
+      const maps = LIB.filter(m => m.folder === f.key);
+      if (!maps.length) continue;
+      const grp = document.createElement('optgroup');
+      grp.label = f.label;
+      for (const m of maps) {
+        const op = document.createElement('option');
+        op.value = m.id;
+        op.textContent = m.name;
+        grp.appendChild(op);
+      }
+      mapSelect.appendChild(grp);
     }
 
-    updateLeaderboardView(mapSelect.value);
+    mapSelect.value = selectedMapId && LIB.some(m => m.id === selectedMapId) ? selectedMapId : LIB[0].id;
+    updateLeaderboardView(mapSelect.value, true);
   }
 
-  function updateLeaderboardView(mapId) {
+  async function updateLeaderboardView(mapId, force) {
     const listEl = $('#lbList');
-    listEl.innerHTML = '';
+    if (!mapId) { listEl.innerHTML = ''; return; }
 
-    if (!mapId) return;
+    const tok = ++lbTok;
+    const cached = Leaderboard.peek(mapId);
+    if (cached == null) listEl.innerHTML = '<div class="empty">Loading scores…</div>';
 
-    const scores = Leaderboard.getAll(mapId);
+    const { scores, offline } = await Leaderboard.get(mapId, force);
+    if (tok !== lbTok) return; // a newer request replaced this one
+
+    const note = offline ? '<div class="empty">Server unreachable. Showing the last known scores.</div>' : '';
     if (!scores.length) {
-      listEl.innerHTML = '<div class="empty">No scores recorded for this map yet!</div>';
+      listEl.innerHTML = note + '<div class="empty">No scores recorded for this map yet!</div>';
       return;
     }
 
-    let html = `<table class="lb-table">
+    const me = (currentPlayer.name + '|' + currentPlayer.school).toLowerCase();
+    let html = note + `<table class="lb-table">
       <thead>
-        <tr>
-          <th>#</th>
-          <th>Player</th>
-          <th>School</th>
-          <th>Score</th>
-          <th>Acc</th>
-          <th>Combo</th>
-        </tr>
+        <tr><th>#</th><th>Player</th><th>School</th><th>Score</th><th>Acc</th><th>Combo</th><th>Grade</th></tr>
       </thead>
       <tbody>`;
 
     scores.forEach((s, idx) => {
-      html += `<tr>
+      const mine = (s.name + '|' + s.school).toLowerCase() === me;
+      html += `<tr class="${mine ? 'me' : ''}">
         <td>${idx + 1}</td>
         <td><b>${esc(s.name)}</b></td>
         <td>${esc(s.school)}</td>
         <td>${fmt(s.score)}</td>
-        <td>${s.acc.toFixed(2)}%</td>
+        <td>${Number(s.acc).toFixed(2)}%</td>
         <td>x${s.maxCombo}</td>
+        <td>${esc(s.grade || '-')}${s.cleared === false ? ' <small>(failed)</small>' : ''}</td>
       </tr>`;
     });
 
-    html += '</tbody></table>';
-    listEl.innerHTML = html;
+    listEl.innerHTML = html + '</tbody></table>';
   }
 
-  $('#lbMapSelect').onchange = e => updateLeaderboardView(e.target.value);
-  $('#btnLeaderboard').onclick = () => {
-    renderLeaderboardModal(hov && hov.meta ? hov.meta.id : null);
-    $('#leaderboardModal').hidden = false;
-  };
+  $('#lbMapSelect').onchange = e => updateLeaderboardView(e.target.value, true);
+  $('#btnLeaderboard').onclick = () => openLeaderboard(hov && hov.meta ? hov.meta.id : null);
   $('#btnResLeaderboard').onclick = () => {
-    renderLeaderboardModal(g && g.meta ? g.meta.id : null);
-    $('#leaderboardModal').hidden = false;
+    // stop the auto-return countdown so the player can read the board in peace
+    clearInterval(backTimer);
+    $('#btnBack').textContent = 'Back';
+    openLeaderboard(g && g.meta ? g.meta.id : null);
   };
-  $('#lbClose').onclick = () => $('#leaderboardModal').hidden = true;
+  $('#lbClose').onclick = () => { $('#leaderboardModal').hidden = true; clearInterval(lbTimer); };
 
   /* ==========================================================================
      Library Management & Settings Listeners
@@ -1745,7 +2020,7 @@
       for (const m of maps) {
         const r = document.createElement('div');
         r.className = 'row';
-        r.innerHTML = '<b>' + esc(m.name) + '</b><small>' + esc(m.mapper) + ' · ' + fmtTime(m.dur) + ' · ' + m.nps.toFixed(1) + '/s</small>';
+        r.innerHTML = '<b>' + esc(m.name) + '</b><small>' + esc(m.mapper) + ' · ' + fmtTime(m.dur) + ' · ' + m.nps.toFixed(1) + '/s' + (m.source === 'server' ? ' · server' : '') + '</small>';
 
         const d = document.createElement('div');
         d.className = 'row-actions';
@@ -1778,7 +2053,8 @@
           refreshLib();
         };
 
-        d.append(sel, del);
+        if (m.source === 'server') d.append(sel);
+        else d.append(sel, del);
         r.appendChild(d);
         col.appendChild(r);
       }
@@ -1799,7 +2075,12 @@
   $('#setClose').onclick = () => $('#settings').hidden = true;
 
   for (const o of [$('#library'), $('#settings'), $('#leaderboardModal'), $('#playerModal')]) {
-    o.addEventListener('pointerdown', e => { if (e.target === o && o.id !== 'playerModal') o.hidden = true; });
+    o.addEventListener('pointerdown', e => {
+      if (e.target === o && o.id !== 'playerModal') {
+        o.hidden = true;
+        if (o.id === 'leaderboardModal') clearInterval(lbTimer);
+      }
+    });
   }
 
   const SET = [
@@ -1898,8 +2179,10 @@
 
   renderCard();
   Store.ready.then(async () => {
-    await refreshLib();
-    await loadMapsFromMapsFolder();
+    await refreshLib();       // instant: whatever is cached from last visit
+    await syncServerMaps();   // then pick up new/changed/removed maps from /maps/
+    Leaderboard.flush();      // upload any scores saved while offline
+    prefetchMaps();           // warm the cache in the background
   });
   requestAnimationFrame(loop);
 
