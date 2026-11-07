@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Pulse!</title>
+  
+  <!-- External Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700;900&family=Manrope:wght@400;600;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  
+  <!-- External Stylesheet -->
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Lobby Background Canvas -->
+    <canvas id="bg"></canvas>
+
+    <!-- Main Lobby Interface -->
+    <main id="lobby" hidden>
+      <header class="top">
+        <div class="brand">
+          <b>Pulse</b><i>!</i>
+        </div>
+        <div class="tools">
+          <button class="ghost" id="btnLeaderboard">Leaderboard</button>
+          <button class="ghost" id="btnImport">Import .sspm</button>
+          <button class="ghost" id="btnLib">Library</button>
+          <button class="ghost" id="btnSet">Settings</button>
+        </div>
+      </header>
+
+      <!-- Stage Preview Section -->
+      <section class="stage" id="stage">
+        <div class="info">
+          <p class="eyebrow" id="cardFolder">Lobby</p>
+          <h1 id="cardTitle">Hover a difficulty</h1>
+          <p id="cardSub">Each hover picks a random map from that folder and plays a preview.</p>
+          <ul class="chips" id="cardChips"></ul>
+          <!-- Compact Hover Leaderboard -->
+          <div id="cardLeaderboard" class="card-lb"></div>
+          <canvas id="viz"></canvas>
+        </div>
+        <div class="shot">
+          <canvas id="mini"></canvas>
+          <span class="live" id="liveTag">PREVIEW</span>
+        </div>
+      </section>
+
+      <!-- Difficulty Selectors -->
+      <nav class="diffs" aria-label="Difficulty">
+        <button class="diff" data-f="easy" style="--c:var(--easy)">
+          <span class="dl">Easy</span>
+          <span class="dn" id="cnt-easy">0 maps</span>
+        </button>
+        <button class="diff" data-f="hard" style="--c:var(--hard)">
+          <span class="dl">Hard</span>
+          <span class="dn" id="cnt-hard">0 maps</span>
+        </button>
+        <button class="diff" data-f="insane" style="--c:var(--insane)">
+          <span class="dl">Insane</span>
+          <span class="dn" id="cnt-insane">0 maps</span>
+        </button>
+        <button class="diff" data-f="death" style="--c:var(--death)" aria-label="Death">
+          <span class="dl">助けて!!</span>
+          <span class="dn" id="cnt-death">0 maps</span>
+        </button>
+      </nav>
+    </main>
+
+    <!-- Gameplay Canvas -->
+    <canvas id="game" hidden></canvas>
+
+    <!-- Splash Screen Overlay -->
+    <section class="ovl" id="splash">
+      <div class="panel">
+        <h2>PULSE <i style="color: rgb(255, 136, 136);">!</i></h2>
+        <p>Base on <a href="https://www.roblox.com/games/2677609345/Sound-Space-Rhythm-Game"> Space Space </a>: fast-paced rhythm game where players hit notes in time while also aiming accurately at notes.</p>
+        <div class="keys">
+          <b>Mouse</b><span>Move cursor over each note as it reaches the grid</span>
+          <b>Esc</b><span>Pause</span>
+          <b>Drop</b><span>Drag .sspm files onto the page to add them</span>
+          <b>Totally</b> Not vibe coded.
+        </div>
+        <button class="btn" id="btnStart">Start</button>
+      </div>
+    </section>
+
+    <!-- Open House Player Registration Modal -->
+    <section class="ovl" id="playerModal" hidden>
+      <div class="panel">
+        <h2>Open House Registration</h2>
+        <p>Please enter your details before playing to register on the leaderboard!</p>
+        <div class="form-group">
+          <label for="pName">Player Name</label>
+          <input type="text" id="pName" placeholder="e.g. Alex" maxlength="24">
+        </div>
+        <div class="form-group">
+          <label for="pSchool">School</label>
+          <input type="text" id="pSchool" placeholder="e.g. Suphanburi Tech" maxlength="32">
+        </div>
+        <div class="acts">
+          <button class="btn" id="btnStartGame">Play Map</button>
+          <button class="btn alt" id="btnCancelPlayer">Cancel</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Leaderboard Modal -->
+    <section class="ovl" id="leaderboardModal" hidden>
+      <div class="panel lib">
+        <div class="res-top">
+          <h2>Map Leaderboards</h2>
+          <button class="ghost" id="lbClose">Close</button>
+        </div>
+        <div class="form-group">
+          <label for="lbMapSelect">Select Map:</label>
+          <select id="lbMapSelect" class="lb-select"></select>
+        </div>
+        <div id="lbList"></div>
+      </div>
+    </section>
+
+    <!-- Loading Screen Overlay -->
+    <section class="ovl" id="loading" hidden>
+      <div>LOADING<b id="loadName"></b></div>
+    </section>
+
+    <!-- Pause Menu Overlay -->
+    <section class="ovl" id="pause" hidden>
+      <div class="panel">
+        <h2>Paused</h2>
+        <button class="btn" id="pResume">Resume</button>
+        <button class="btn alt" id="pRestart">Restart</button>
+        <button class="btn alt" id="pQuit">Quit to lobby</button>
+      </div>
+    </section>
+
+    <!-- Song Results Overlay -->
+    <section class="ovl" id="results" hidden>
+      <div class="panel">
+        <div class="res-top">
+          <div>
+            <div class="res-status" id="resStatus">CLEARED</div>
+            <div class="res-title" id="resTitle"></div>
+            <div class="empty" id="resMeta"></div>
+          </div>
+          <div class="grade" id="resGrade">S</div>
+        </div>
+        <div class="stats">
+          <div class="stat"><span>Score</span><b id="rScore">0</b></div>
+          <div class="stat"><span>Accuracy</span><b id="rAcc">0%</b></div>
+          <div class="stat"><span>Max combo</span><b id="rCombo">0</b></div>
+          <div class="stat"><span>Hits</span><b id="rHits">0</b></div>
+          <div class="stat"><span>Misses</span><b id="rMiss">0</b></div>
+          <div class="stat"><span>Progress</span><b id="rProg">0%</b></div>
+        </div>
+        <canvas id="resTimeline"></canvas>
+        <div class="tl-cap">
+          <span>Start</span>
+          <span>Misses over the song</span>
+          <span>End</span>
+        </div>
+        <div class="acts">
+          <button class="btn ghost" id="btnResLeaderboard">View Leaderboard</button>
+          <button class="btn hot" id="btnReplay" hidden>Replay</button>
+          <button class="btn alt" id="btnBack">Back (<span id="backCount">15</span>)</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Song Library Modal -->
+    <section class="ovl" id="library" hidden>
+      <div class="panel lib">
+        <div class="res-top">
+          <h2>Library</h2>
+          <button class="ghost" id="libClose">Close</button>
+        </div>
+        <p>Maps are sorted into folders by difficulty tag inside each .sspm.</p>
+        <div class="cols" id="libCols"></div>
+        <button class="btn" id="libImport">Import .sspm files</button>
+      </div>
+    </section>
+
+    <!-- Settings Modal -->
+    <section class="ovl" id="settings" hidden>
+      <div class="panel">
+        <div class="res-top">
+          <h2>Settings</h2>
+          <button class="ghost" id="setClose">Close</button>
+        </div>
+        <div class="set">
+          <label for="sSens">Sensitivity</label>
+          <output id="oSens"></output>
+          <input type="range" id="sSens" min="0.2" max="4" step="0.05">
+
+          <label for="sApp">Approach time</label>
+          <output id="oApp"></output>
+          <input type="range" id="sApp" min="450" max="1600" step="10">
+
+          <label for="sVol">Music volume</label>
+          <output id="oVol"></output>
+          <input type="range" id="sVol" min="0" max="1" step="0.01">
+
+          <label for="sSfx">Hit sound volume</label>
+          <output id="oSfx"></output>
+          <input type="range" id="sSfx" min="0" max="1" step="0.01">
+
+          <label for="sOff">Audio offset</label>
+          <output id="oOff"></output>
+          <input type="range" id="sOff" min="-150" max="150" step="1">
+
+          <label for="sMouse">Mouse mode</label>
+          <span></span>
+          <select id="sMouse">
+            <option value="auto">Locked raw input (falls back to free)</option>
+            <option value="free">Free pointer over the grid</option>
+          </select>
+
+          <label for="sQ">Graphics quality</label>
+          <span></span>
+          <select id="sQ">
+            <option value="high">High (sharpest)</option>
+            <option value="balanced">Balanced</option>
+            <option value="low">Low (fastest)</option>
+            <option value="potato">Potato (lowest)</option>
+          </select>
+        </div>
+      </div>
+    </section>
+
+    <!-- Drag & Drop Overlay -->
+    <section class="ovl" id="drop" hidden>Drop .sspm files to add them</section>
+    
+    <!-- Notification Toast -->
+    <div id="toast" hidden></div>
+    
+    <!-- Hidden File Input -->
+    <input type="file" id="file" accept=".sspm" multiple hidden>
+  </div>
+
+  <!-- Main Game Script -->
+  <script src="renderer.js"></script>
+  <script src="script.js"></script>
+</body>
+</html>
