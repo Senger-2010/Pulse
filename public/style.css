@@ -55,6 +55,14 @@ img {
   display: none !important;
 }
 
+/* iOS/Safari can't type into inputs inside a user-select:none tree */
+input,
+select,
+textarea {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 button {
   font: inherit;
   color: inherit;
@@ -279,7 +287,7 @@ canvas {
   border: 2px solid var(--c);
   background: linear-gradient(160deg, color-mix(in srgb, var(--c) 26%, #0b0716), #0b0716 70%);
   box-shadow: 0 0 0 0 transparent;
-  transition: box-shadow 0.2s;
+  transition: all cubic-bezier(0.175, 0.885, 0.32, 1.275) 0.2s;
   will-change: transform;
 }
 
@@ -819,4 +827,61 @@ canvas {
   #cardSub {
     display: none;
   }
+}
+
+/* ==========================================================================
+   Additions: stacking order, results rank line, leaderboard highlights
+   ========================================================================== */
+/* Modals opened from the results screen must sit above it (same z-index
+   as .ovl would otherwise lose to the later-in-DOM results overlay). */
+.ovl.modal-top {
+  z-index: 25;
+}
+
+.rank-line {
+  font-family: var(--mono);
+  font-size: 13px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  color: var(--dim);
+}
+
+.rank-line.good {
+  color: var(--easy);
+  border-color: var(--easy);
+}
+
+.rank-line.warn {
+  color: var(--hard);
+  border-color: var(--hard);
+}
+
+.rank-line.bad {
+  color: var(--pink);
+  border-color: var(--pink);
+}
+
+.lb-table tr.me {
+  background: rgba(53, 214, 255, 0.1);
+}
+
+.lb-table tr.me td:first-child {
+  box-shadow: inset 3px 0 0 var(--cyan);
+}
+
+.lb-table small {
+  color: var(--pink);
+  font-family: var(--mono);
+}
+
+.lb-select option,
+.lb-select optgroup {
+  background: var(--panel);
+  color: var(--fg);
+}
+
+#lbList {
+  overflow-x: auto;
 }
