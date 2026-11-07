@@ -75,6 +75,28 @@
     <!-- Gameplay Canvas -->
     <canvas id="game" hidden></canvas>
 
+    <!-- Replay Player Overlay -->
+    <section class="ovl modal-top" id="replayModal" hidden role="dialog" aria-modal="true" aria-label="Replay Viewer">
+      <div class="panel replay-panel">
+        <div class="res-top">
+          <div>
+            <div class="res-status" id="replayStatus">REPLAY WATCH</div>
+            <h2 id="replayTitle">Replay</h2>
+            <div class="empty" id="replayMeta"></div>
+          </div>
+          <button class="ghost" id="replayClose">Close</button>
+        </div>
+        <div class="shot replay-shot">
+          <canvas id="replayCanvas"></canvas>
+        </div>
+        <div class="stats">
+          <div class="stat"><span>Score</span><b id="rpScore">0</b></div>
+          <div class="stat"><span>Accuracy</span><b id="rpAcc">0%</b></div>
+          <div class="stat"><span>Combo</span><b id="rpCombo">0</b></div>
+        </div>
+      </div>
+    </section>
+
     <!-- Splash Screen Overlay -->
     <section class="ovl" id="splash">
       <div class="panel">
@@ -85,7 +107,7 @@
           <b>Mouse</b><span>Move cursor over each note as it reaches the grid</span>
           <b>Esc</b><span>Pause</span>
           <b>Drop</b><span>Drag .sspm files onto the page to add them</span>
-          <b>Totally</b><span>Not vibe coded.</span>
+          <b>Watch Top 3</b><span>Click ▶ on top leaderboard scores to watch recordings</span>
         </div>
         <button class="btn" id="btnStart">Start</button>
       </div>
@@ -244,6 +266,8 @@
     <input type="file" id="file" accept=".sspm" multiple hidden>
   </div>
 
+  <!-- WebGL2 Renderer Engine -->
+  <script src="renderer.js"></script>
   <!-- Main Game Script -->
   <script src="script.js"></script>
 </body>
