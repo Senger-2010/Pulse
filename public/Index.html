@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Pulse!</title>
+  <meta name="theme-color" content="#07050f">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27><text y=%27.9em%27 font-size=%2790%27>💠</text></svg>">
   
   <!-- External Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -76,30 +78,31 @@
     <!-- Splash Screen Overlay -->
     <section class="ovl" id="splash">
       <div class="panel">
-        <h2>PULSE <i style="color: rgb(255, 136, 136);">!</i></h2>
-        <p>Base on <a href="https://www.roblox.com/games/2677609345/Sound-Space-Rhythm-Game"> Space Space </a>: fast-paced rhythm game where players hit notes in time while also aiming accurately at notes.</p>
+        <h2>PULSE<i style="color: rgb(255, 136, 136);">!</i></h2>
+        <p style="color: rgb(231, 59, 59); ">Warning!! This content may potentially trigger seizures for people with photosensitive epilepsy.</p>
+        <p>Based on <a href="https://www.roblox.com/games/2677609345/Sound-Space-Rhythm-Game" target="_blank" rel="noopener noreferrer">Sound Space</a>: a fast-paced rhythm game where you hit notes in time while aiming accurately at them.</p>
         <div class="keys">
           <b>Mouse</b><span>Move cursor over each note as it reaches the grid</span>
           <b>Esc</b><span>Pause</span>
           <b>Drop</b><span>Drag .sspm files onto the page to add them</span>
-          <b>Totally</b> Not vibe coded.
+          <b>Totally</b><span>Not vibe coded.</span>
         </div>
         <button class="btn" id="btnStart">Start</button>
       </div>
     </section>
 
     <!-- Open House Player Registration Modal -->
-    <section class="ovl" id="playerModal" hidden>
+    <section class="ovl modal-top" id="playerModal" hidden role="dialog" aria-modal="true" aria-labelledby="pmTitle">
       <div class="panel">
-        <h2>Open House Registration</h2>
+        <h2 id="pmTitle">Open House Registration</h2>
         <p>Please enter your details before playing to register on the leaderboard!</p>
         <div class="form-group">
           <label for="pName">Player Name</label>
-          <input type="text" id="pName" placeholder="e.g. Alex" maxlength="24">
+          <input type="text" id="pName" placeholder="e.g. Alex" maxlength="24" autocomplete="off">
         </div>
         <div class="form-group">
           <label for="pSchool">School</label>
-          <input type="text" id="pSchool" placeholder="e.g. Suphanburi Tech" maxlength="32">
+          <input type="text" id="pSchool" placeholder="e.g. Suphanburi Tech" maxlength="32" autocomplete="off">
         </div>
         <div class="acts">
           <button class="btn" id="btnStartGame">Play Map</button>
@@ -109,7 +112,7 @@
     </section>
 
     <!-- Leaderboard Modal -->
-    <section class="ovl" id="leaderboardModal" hidden>
+    <section class="ovl modal-top" id="leaderboardModal" hidden role="dialog" aria-modal="true" aria-label="Map leaderboards">
       <div class="panel lib">
         <div class="res-top">
           <h2>Map Leaderboards</h2>
@@ -157,6 +160,7 @@
           <div class="stat"><span>Misses</span><b id="rMiss">0</b></div>
           <div class="stat"><span>Progress</span><b id="rProg">0%</b></div>
         </div>
+        <div class="rank-line" id="resRank" hidden></div>
         <canvas id="resTimeline"></canvas>
         <div class="tl-cap">
           <span>Start</span>
@@ -164,7 +168,7 @@
           <span>End</span>
         </div>
         <div class="acts">
-          <button class="btn ghost" id="btnResLeaderboard">View Leaderboard</button>
+          <button class="btn alt" id="btnResLeaderboard">View Leaderboard</button>
           <button class="btn hot" id="btnReplay" hidden>Replay</button>
           <button class="btn alt" id="btnBack">Back (<span id="backCount">15</span>)</button>
         </div>
@@ -234,7 +238,7 @@
     <section class="ovl" id="drop" hidden>Drop .sspm files to add them</section>
     
     <!-- Notification Toast -->
-    <div id="toast" hidden></div>
+    <div id="toast" hidden role="status" aria-live="polite"></div>
     
     <!-- Hidden File Input -->
     <input type="file" id="file" accept=".sspm" multiple hidden>
