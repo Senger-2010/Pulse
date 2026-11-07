@@ -46,18 +46,7 @@
     quality: 'balanced'
   };
 
-  // Render scale per quality level (potato renders at 60% and lets the browser upscale)
-  const qCap = () => ({ high: 2, balanced: 1.25, low: 1, potato: 0.6 })[S.quality] || 1.25;
-  const lowFxOn = () => S.quality === 'low' || S.quality === 'potato';
-  // What the WebGL renderer may draw at each quality level
-  const fxFor = () => ({
-    glow: S.quality === 'high' || S.quality === 'balanced',
-    rings: S.quality !== 'low' && S.quality !== 'potato',
-    kickRings: S.quality !== 'potato',
-    kickBg: S.quality !== 'potato',
-    trail: S.quality !== 'potato',
-    flat: S.quality === 'potato'
-  });
+  const qCap = () => S.quality === 'high' ? 2 : S.quality === 'low' ? 1 : 1.25;
   const REDUCE = matchMedia('(prefers-reduced-motion: reduce)');
   const S = { ...DEF };
 
@@ -540,7 +529,6 @@
      Audio Processing Subsystem (Web Audio API)
      ========================================================================== */
   let AC = null, master, analyser, sfx, previewEl, previewGain, freq = new Uint8Array(512), bass = 0;
-  let kickEnv = 0, kickPrev = 0, kickAvg = 0.2, kickLast = 0;
 
   function initAudio() {
     if (AC) return;
@@ -579,51 +567,6 @@
     let b = 0;
     for (let i = 0; i < 5; i++) b += freq[i];
     bass = lerp(bass, b / 5 / 255, 0.5);
-
-    // Live kick detector: a sudden rise of low-frequency energy above its recent average
-    const low = (freq[1] + freq[2] + freq[3]) / 3 / 255;
-    const now = performance.now();
-    if (low > 0.45 && low - kickPrev > 0.06 && low > kickAvg * 1.25 && now - kickLast > 150) {
-      kickEnv = 1;
-      kickLast = now;
-    }
-    kickAvg = lerp(kickAvg, low, 0.04);
-    kickPrev = low;
-  }
-
-  // Kick detection for a whole song, done once after decoding. Gameplay uses these exact
-  // timestamps, so the background reacts in perfect sync (no analyser latency).
-  function detectKicks(buf) {
-    const sr = buf.sampleRate, c0 = buf.getChannelData(0);
-    const c1 = buf.numberOfChannels > 1 ? buf.getChannelData(1) : c0;
-    const hop = Math.max(1, Math.floor(sr * 0.01));          // 10 ms frames
-    const n = Math.floor(buf.length / hop);
-    const a = 1 - Math.exp(-2 * Math.PI * 120 / sr);          // ~120 Hz low-pass (two poles)
-    let y1 = 0, y2 = 0;
-    const env = new Float32Array(n);
-    for (let h = 0; h < n; h++) {
-      let e = 0;
-      for (let i = h * hop, end = i + hop; i < end; i++) {
-        y1 += a * ((c0[i] + c1[i]) * 0.5 - y1);
-        y2 += a * (y1 - y2);
-        e += y2 * y2;
-      }
-      env[h] = Math.sqrt(e / hop);
-    }
-    const sorted = Float32Array.from(env).sort();
-    const loud = sorted[Math.floor(n * 0.95)] || 0;
-    const times = [], str = [];
-    let avg = 0, lastH = -100;
-    for (let h = 1; h < n - 1; h++) {
-      avg += (env[h] - avg) * 0.02;                           // ~0.5 s running mean
-      const v = env[h];
-      if (v > env[h - 1] && v >= env[h + 1] && v > avg * 1.5 && v > loud * 0.22 && h - lastH >= 16) {
-        times.push(h * 10);
-        str.push(clamp((v / Math.max(avg, 1e-6) - 1) / 2.5, 0.35, 1));
-        lastH = h;
-      }
-    }
-    return { t: Float32Array.from(times), s: Float32Array.from(str), n: times.length, lo: 0 };
   }
 
   function blip(kind) {
@@ -1092,7 +1035,7 @@
         t,
         notes: e.notes,
         approach: S.approach,
-        bass: Math.max(bass, kickEnv),
+        bass,
         cursor: autoCursor(e.notes, t),
         trail: null,
         lowFx: true
@@ -1119,8 +1062,8 @@
       t: performance.now(),
       notes: null,
       approach: 1400,
-      bass: Math.max(bass, kickEnv),
-      lowFx: lowFxOn()
+      bass,
+      lowFx: S.quality === 'low'
     });
   }
 
@@ -1160,33 +1103,15 @@
   /* ==========================================================================
      Main Game Engine & Loop
      ========================================================================== */
-  const cv = $('#game');
-  const GL = window.PulseGL ? window.PulseGL.create(cv) : null;   // null => canvas 2D fallback
-  const cx = GL ? null : cv.getContext('2d');
-  let hudC = null, hudX = null, hudDpr = 1;
-  if (GL) {
-    hudC = document.createElement('canvas');
-    hudC.id = 'hud';
-    hudC.hidden = true;
-    hudC.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:1';
-    cv.after(hudC);
-    hudX = hudC.getContext('2d');
-  }
+  const cv = $('#game'), cx = cv.getContext('2d');
   let g = null, gW = 0, gH = 0, gDpr = 1;
 
   function sizeGame() {
     gDpr = Math.min(qCap(), devicePixelRatio || 1);
     gW = innerWidth;
     gH = innerHeight;
-    if (GL) {
-      GL.resize(gW, gH, gDpr);
-      hudDpr = Math.min(devicePixelRatio || 1, S.quality === 'potato' ? 1 : 1.5);
-      hudC.width = Math.round(gW * hudDpr);
-      hudC.height = Math.round(gH * hudDpr);
-    } else {
-      cv.width = Math.round(gW * gDpr);
-      cv.height = Math.round(gH * gDpr);
-    }
+    cv.width = Math.round(gW * gDpr);
+    cv.height = Math.round(gH * gDpr);
   }
 
   addEventListener('resize', () => { if (screen === 'game') sizeGame(); });
@@ -1209,7 +1134,6 @@
     screen = s;
     $('#lobby').hidden = s !== 'lobby';
     cv.hidden = s !== 'game';
-    if (hudC) hudC.hidden = s !== 'game';
     $('#bg').hidden = s === 'game';
     if (s === 'game') sizeGame();
   }
@@ -1217,7 +1141,7 @@
   async function decode(e) {
     if (!e.decoded) {
       for (const o of ENT.values()) if (o !== e) o.decoded = null;
-      e.decoded = AC.decodeAudioData(e.audio.bytes.slice().buffer).then(b => { try { e.kicks = detectKicks(b); } catch (err) { e.kicks = null; } return b; });
+      e.decoded = AC.decodeAudioData(e.audio.bytes.slice().buffer);
       e.decoded.catch(() => { e.decoded = null; });
     }
     return e.decoded;
@@ -1236,11 +1160,9 @@
     $('#pause').hidden = true;
 
     showScreen('game');
-    if (cx) {
-      cx.setTransform(1, 0, 0, 1, 0, 0);
-      cx.fillStyle = '#06040d';
-      cx.fillRect(0, 0, cv.width, cv.height);
-    }
+    cx.setTransform(1, 0, 0, 1, 0, 0);
+    cx.fillStyle = '#06040d';
+    cx.fillRect(0, 0, cv.width, cv.height);
 
     if (S.mouse !== 'free') requestLock();
     hovTok++;
@@ -1296,11 +1218,8 @@
       auto: location.hash === '#auto',
       hadLock: false,
       s0: 100,
-      lockWatch: performance.now(),
-      kicks: e.kicks ? { ...e.kicks, lo: 0 } : null,
-      hT: new Float64Array(HN), hX: new Float32Array(HN), hY: new Float32Array(HN), hI: 0, hC: 0
+      lockWatch: performance.now()
     };
-    pushHist(performance.now(), 0, 0);
     playFrom(-LEAD);
   }
 
@@ -1350,25 +1269,8 @@
     return document.pointerLockElement === cv;
   }
 
-  /* ---- Input ----
-     pointerrawupdate arrives straight from the device (not aligned to frames), so the cursor
-     is up to a frame fresher than with mousemove. Every sample is stored with its own
-     timestamp and the judge replays them, so hits don't depend on the frame rate. */
-  const HN = 2048;
-  let rawSeenAt = -1e9;
-
-  function pushHist(ts, x, y) {
-    const i = g.hI;
-    g.hT[i] = ts; g.hX[i] = x; g.hY[i] = y;
-    g.hI = (i + 1) % HN;
-    if (g.hC < HN) g.hC++;
-  }
-
-  function onMove(e, fromRaw) {
-    if (!g || g.over || g.paused || g.auto) return;
-    const now = performance.now();
-    if (fromRaw) rawSeenAt = now;
-    else if (now - rawSeenAt < 100) return;          // raw events are already feeding us
+  addEventListener('mousemove', e => {
+    if (!g || g.over || g.paused) return;
     if (locked()) {
       g.hadLock = true;
       const k = 0.005 * S.sens;
@@ -1378,10 +1280,7 @@
       g.cur.x = clamp((e.clientX - gW / 2) / g.s0, -CLAMP, CLAMP);
       g.cur.y = clamp((e.clientY - gH / 2) / g.s0, -CLAMP, CLAMP);
     }
-    pushHist(e.timeStamp > 0 && e.timeStamp <= now + 5 ? e.timeStamp : now, g.cur.x, g.cur.y);
-  }
-  addEventListener('mousemove', e => onMove(e, false));
-  addEventListener('pointerrawupdate', e => onMove(e, true));
+  });
 
   document.addEventListener('pointerlockchange', () => {
     if (locked()) {
@@ -1425,74 +1324,30 @@
     g.cdStart = performance.now();
   }
 
-  // Cursor position at a given performance.now() time, from the recorded samples
-  function histAt(pt) {
-    if (!g.hC) return [g.cur.x, g.cur.y];
-    let j = (g.hI - 1 + HN) % HN;
-    if (pt >= g.hT[j]) return [g.hX[j], g.hY[j]];
-    for (let n = 1; n < g.hC; n++) {
-      const k = (j - 1 + HN) % HN;
-      if (g.hT[k] <= pt) {
-        const span = g.hT[j] - g.hT[k], u = span > 0 ? (pt - g.hT[k]) / span : 0;
-        return [lerp(g.hX[k], g.hX[j], u), lerp(g.hY[k], g.hY[j], u)];
-      }
-      j = k;
-    }
-    return [g.hX[j], g.hY[j]];
-  }
-
-  // Slab test: when (0..1) a segment first enters a box, or -1
-  function segEnter(x0, y0, x1, y1, bx, by, h) {
-    let t0 = 0, t1 = 1;
-    for (const [p, q, c] of [[x0, x1, bx], [y0, y1, by]]) {
-      const d = q - p, lo = c - h - p, hi = c + h - p;
-      if (Math.abs(d) < 1e-9) {
-        if (lo > 0 || hi < 0) return -1;
-      } else {
-        let a = lo / d, b = hi / d;
-        if (a > b) { const tmp = a; a = b; b = tmp; }
-        t0 = Math.max(t0, a);
-        t1 = Math.min(t1, b);
-        if (t0 > t1) return -1;
-      }
-    }
-    return t0;
-  }
-
-  // First performance.now() time in [perfA, perfB] at which the cursor touches the note box, or -1
-  function sweepHit(bx, by, perfA, perfB) {
-    const h = (NOTE + CUR) / 2;
-    let [px, py] = histAt(perfA);
-    if (Math.abs(px - bx) <= h && Math.abs(py - by) <= h) return perfA;
-    let pt = perfA;
-    const start = (g.hI - g.hC + HN) % HN;
-    for (let n = 0; n < g.hC; n++) {
-      const j = (start + n) % HN, tj = g.hT[j];
-      if (tj <= perfA) continue;
-      if (tj > perfB) break;
-      const u = segEnter(px, py, g.hX[j], g.hY[j], bx, by, h);
-      if (u >= 0) return pt + u * (tj - pt);
-      px = g.hX[j]; py = g.hY[j]; pt = tj;
-    }
-    return -1;
-  }
-
   // Hit Detection & Logic Judge
-  // A note can be hit from the moment it reaches the grid until MAX_LATE_TIME later.
-  // It can never be hit early.
   function judge(t) {
-    const N = g.notes, st = g.states, pf = performance.now();
+    const N = g.notes, st = g.states;
     for (let i = g.lo; i < g.N; i++) {
       const n = N[i];
       if (st[i] !== 0) continue;
-      if (n.ms > t) break;                                  // not at the grid yet: no early hits
 
-      const end = Math.min(t, n.ms + MAX_LATE_TIME);
-      const ph = sweepHit(n.x - 1, n.y - 1, pf - (t - n.ms), pf - (t - end));
+      // Restrict note processing if it exceeds max late time (MAX_LATE_TIME = 70ms)
+      if (t > n.ms + MAX_LATE_TIME) {
+        st[i] = 2; // Miss
+        g.misses++;
+        g.combo = 0;
+        g.hp -= HP_MISS;
+        g.lastMiss = performance.now();
+        g.events.push({ t: n.ms, h: 0 });
+        blip('miss');
+        continue;
+      }
 
-      if (ph >= 0) {
+      if (n.ms > t + MAX_LATE_TIME) break;
+
+      if (Math.abs(n.x - 1 - g.cur.x) <= (NOTE + CUR) / 2 && Math.abs(n.y - 1 - g.cur.y) <= (NOTE + CUR) / 2) {
         st[i] = 1;
-        g.hitAt[i] = Math.max(n.ms, t - (pf - ph));
+        g.hitAt[i] = t;
         g.hits++;
         g.combo++;
         if (g.combo > g.maxCombo) g.maxCombo = g.combo;
@@ -1502,32 +1357,13 @@
         g.lastHit = t;
         g.events.push({ t: n.ms, h: 1 });
         blip('hit');
-      } else if (t > n.ms + MAX_LATE_TIME) {
-        st[i] = 2;                                          // Miss
-        g.misses++;
-        g.combo = 0;
-        g.hp -= HP_MISS;
-        g.lastMiss = performance.now();
-        g.events.push({ t: n.ms, h: 0 });
-        blip('miss');
       }
     }
     while (g.lo < g.N && st[g.lo] !== 0) g.lo++;
   }
 
   function updateGame(t) {
-    if (g.auto) {
-      // Demo bot: feed cursor samples every 8 ms of song time so it behaves the same at any frame rate
-      const pf = performance.now();
-      let tk = g.autoT === undefined ? t : g.autoT;
-      for (tk += 8; tk <= t; tk += 8) {
-        const c = autoCursor(g.notes, tk);
-        pushHist(pf - (t - tk), c.x, c.y);
-      }
-      g.autoT = tk - 8;
-      g.cur = autoCursor(g.notes, t);
-      pushHist(pf, g.cur.x, g.cur.y);
-    }
+    if (g.auto) g.cur = autoCursor(g.notes, t);
     judge(t);
     g.trail.push({ x: g.cur.x, y: g.cur.y });
     if (g.trail.length > 9) g.trail.shift();
@@ -1555,6 +1391,7 @@
     if (idle && g.idleDrawn) return;
     g.idleDrawn = idle;
 
+    cx.setTransform(gDpr, 0, 0, gDpr, 0, 0);
     const nowF = performance.now();
     const dtF = Math.min(100, nowF - g.lastF);
     g.lastF = nowF;
@@ -1565,44 +1402,17 @@
     g.cam.x += ((still ? 0 : g.cur.x * 0.09) - g.cam.x) * k;
     g.cam.y += ((still ? 0 : g.cur.y * 0.09) - g.cam.y) * k;
 
-    // Kick pulse: exact song timestamps when we have them, live detector otherwise
-    kickEnv *= Math.exp(-dtF / 120);
-    const K = g.kicks;
-    if (K && !g.paused) {
-      while (K.lo < K.n && K.t[K.lo] <= t) {
-        if (K.t[K.lo] > t - 120) kickEnv = Math.max(kickEnv, K.s[K.lo]);
-        K.lo++;
-      }
-    }
-
-    if (GL) {
-      GL.render({
-        W: gW, H: gH, t,
-        notes: g.notes, states: g.states, hitAt: g.hitAt, approach: g.approach,
-        cur: g.cur, trail: g.trail, cam: g.cam,
-        bass, kick: kickEnv, kicks: K, fx: fxFor()
-      });
-      g.s0 = Math.min(gH * 0.17, gW * 0.13);
-      if (S.quality !== 'potato' || (tick & 1)) {
-        hudX.setTransform(hudDpr, 0, 0, hudDpr, 0, 0);
-        hudX.clearRect(0, 0, gW, gH);
-        drawHUD(hudX, gW, gH, t);
-      }
-      return;
-    }
-
-    cx.setTransform(gDpr, 0, 0, gDpr, 0, 0);
     const o = {
       t,
       notes: g.notes,
       states: g.states,
       hitAt: g.hitAt,
       approach: g.approach,
-      bass: Math.max(bass, kickEnv),
+      bass,
       cursor: g.cur,
       trail: g.trail,
       cam: g.cam,
-      lowFx: lowFxOn()
+      lowFx: S.quality === 'low'
     };
 
     drawScene(cx, gW, gH, o);
@@ -2078,10 +1888,8 @@
       gameFrame();
     } else {
       sampleAudio();
-      kickEnv *= 0.9;
-      const slow = S.quality === 'potato';
-      if (!(tick & (slow ? 3 : 1))) drawBg();
-      if (screen === 'lobby' && (!slow || !(tick & 1))) {
+      if (!(tick & 1)) drawBg();
+      if (screen === 'lobby') {
         drawViz();
         drawMini();
       }
@@ -2101,7 +1909,6 @@
     S,
     addFiles,
     parseSSPM,
-    MAX_LATE_TIME,
-    gl: !!GL
+    MAX_LATE_TIME
   };
 })();
