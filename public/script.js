@@ -67,7 +67,7 @@
   const NOTE = 0.88;
   const CUR = 0.2;
   const CLAMP = 1.45;
-  const HPMAX = 10;
+  const HPMAX = 5;
   const HP_HIT = 0.35;
   const HP_MISS = 1;
   const LEAD = 2000;
