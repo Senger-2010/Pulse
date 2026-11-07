@@ -1,9 +1,5 @@
 /* ==========================================================================
-   Pulse! WebGL2 playfield renderer
-   - Real perspective projection done in the vertex shader (3D tunnel, cubes)
-   - Thick anti-aliased lines and quads are drawn as GPU instances
-   - Additive blending gives the neon glow without any blur passes
-   - Returns null when WebGL2 is unavailable so script.js falls back to canvas 2D
+   Pulse! WebGL2 renderer :D
    ========================================================================== */
 (function () {
   'use strict';
