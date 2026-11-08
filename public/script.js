@@ -782,6 +782,13 @@
      ========================================================================== */
   let AC = null, master, analyser, sfx, previewEl, previewGain, freq = new Uint8Array(512), bass = 0;
   let kickEnv = 0, kickPrev = 0, kickAvg = 0.2, kickLast = 0;
+  // What the renderers actually show: kick and bass eased (fast attack, slow release) so nothing strobes
+  let kickVis = 0, bassVis = 0;
+  function stepVis(dt) {
+    const kt = kickEnv * KICK_STRENGTH;
+    kickVis += (kt - kickVis) * (1 - Math.exp(-dt / (kt > kickVis ? 45 : 170)));
+    bassVis += (bass - bassVis) * (1 - Math.exp(-dt / 90));
+  }
 
   function initAudio() {
     if (AC) return;
@@ -824,7 +831,8 @@
     // Live kick detector: a sudden rise of low-frequency energy above its recent average
     const low = (freq[1] + freq[2] + freq[3]) / 3 / 255;
     const now = performance.now();
-    if (low > 0.45 && low - kickPrev > 0.06 && low > kickAvg * 1.25 && now - kickLast > 150) {
+    const exact = screen === 'game' && g && g.kicks;       // in a song the exact kick timestamps drive the effect
+    if (!exact && low > 0.45 && low - kickPrev > 0.06 && low > kickAvg * 1.25 && now - kickLast > 150) {
       kickEnv = 1;
       kickLast = now;
     }
@@ -1342,7 +1350,7 @@
         t,
         notes: e.notes,
         approach: S.approach,
-        bass: Math.max(bass, kickEnv * KICK_STRENGTH),
+        bass: Math.max(bassVis, kickVis),
         cursor: autoCursor(e.notes, t),
         trail: null,
         lowFx: true
@@ -1369,7 +1377,7 @@
       t: performance.now(),
       notes: null,
       approach: 1400,
-      bass: Math.max(bass, kickEnv * KICK_STRENGTH),
+      bass: Math.max(bassVis, kickVis),
       lowFx: lowFxOn()
     });
   }
@@ -1868,6 +1876,7 @@
 
     // Kick pulse: exact song timestamps when we have them, live detector otherwise
     kickEnv *= Math.exp(-dtF / 120);
+    stepVis(dtF);
     const K = g.kicks;
     if (K && !g.paused) {
       while (K.lo < K.n && K.t[K.lo] <= t) {
@@ -1881,7 +1890,7 @@
         W: gW, H: gH, t,
         notes: g.notes, states: g.states, hitAt: g.hitAt, approach: g.approach,
         cur: g.cur, trail: g.trail, cam: g.cam,
-        bass, kick: kickEnv * KICK_STRENGTH, kicks: K, fx: fxFor()
+        bass: bassVis, kick: kickVis, kicks: K, fx: fxFor()
       });
       g.s0 = Math.min(gH * 0.17, gW * 0.13);
       if (S.quality !== 'potato' || (tick & 1)) {
@@ -1899,7 +1908,7 @@
       states: g.states,
       hitAt: g.hitAt,
       approach: g.approach,
-      bass: Math.max(bass, kickEnv * KICK_STRENGTH),
+      bass: Math.max(bassVis, kickVis),
       cursor: g.cur,
       trail: g.trail,
       cam: g.cam,
@@ -2520,6 +2529,7 @@
     } else {
       sampleAudio();
       kickEnv *= 0.9;
+      stepVis(16);
       const slow = S.quality === 'potato';
       if (!(tick & (slow ? 3 : 1))) drawBg();
       if (screen === 'lobby' && (!slow || !(tick & 1))) {
