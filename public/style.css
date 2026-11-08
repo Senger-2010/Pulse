@@ -888,3 +888,30 @@ canvas {
 
 /* Replay buttons in the leaderboard */
 .lb-table .rp { padding: 4px 10px; font-size: 12px; white-space: nowrap; }
+
+/* Map cover images (from the .sspm) */
+.cover {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  width: clamp(56px, 22%, 110px);
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.55);
+}
+
+.cover-sm {
+  width: 72px;
+  height: 72px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  flex: none;
+}
+
+.res-info {
+  flex: 1;
+  min-width: 0;
+}
