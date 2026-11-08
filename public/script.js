@@ -45,21 +45,33 @@
     sfx: 0.5,
     offset: 0,
     mouse: 'auto',
-    quality: 'balanced'
+    quality: 'balanced',
+    lowLat: 'off'
   };
 
   // Render scale per quality level (potato renders at 60% and lets the browser upscale)
   const qCap = () => ({ high: 2, balanced: 1.25, low: 1, potato: 0.6 })[S.quality] || 1.25;
   const lowFxOn = () => S.quality === 'low' || S.quality === 'potato';
   // What the WebGL renderer may draw at each quality level
-  const fxFor = () => ({
-    glow: S.quality === 'high' || S.quality === 'balanced',
-    rings: S.quality !== 'low' && S.quality !== 'potato',
-    kickRings: S.quality !== 'potato',
-    kickBg: S.quality !== 'potato',
-    trail: S.quality !== 'potato',
-    flat: S.quality === 'potato'
-  });
+  let fxCache = null, fxQ = '';
+  const fxFor = () => {                                   // cached: no allocation per frame
+    if (fxQ !== S.quality) {
+      fxQ = S.quality;
+      fxCache = {
+        glow: S.quality === 'high' || S.quality === 'balanced',
+        rings: S.quality !== 'low' && S.quality !== 'potato',
+        kickRings: S.quality !== 'potato',
+        kickBg: S.quality !== 'potato',
+        trail: S.quality !== 'potato',
+        flat: S.quality === 'potato'
+      };
+    }
+    return fxCache;
+  };
+  // Cover shown when a map has no image of its own. Save the picture next to index.html as
+  // default-cover.png and point this at it, because Discord links expire after a while.
+  const DEFAULT_COVER = 'https://cdn.discordapp.com/attachments/985414411038642286/1568955605807530025/Untitled332.png?ex=6af1b346&is=6af061c6&hm=86b54c4b05aa39d628c2fdd6fcc5da1a5126c04312d41a5242fa67b774b8ae78&';
+  const COVER_PLACEHOLDER = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2c2250"/><stop offset="1" stop-color="#ff3d71"/></linearGradient></defs><rect width="100" height="100" fill="url(#g)"/><rect x="32" y="32" width="36" height="36" fill="none" stroke="#35d6ff" stroke-width="4"/></svg>');
   const REDUCE = matchMedia('(prefers-reduced-motion: reduce)');
   const S = { ...DEF };
 
@@ -766,9 +778,11 @@
   }
 
   function setCover(img, e) {
-    const u = coverUrlOf(e);
-    if (u) { if (img.getAttribute('src') !== u) img.src = u; img.hidden = false; }
-    else { img.hidden = true; img.removeAttribute('src'); }
+    if (!e) { img.hidden = true; img.removeAttribute('src'); return; }
+    const u = coverUrlOf(e) || DEFAULT_COVER;
+    if (img.getAttribute('src') !== u) img.src = u;
+    if (!img.onerror) img.onerror = () => { if (img.getAttribute('src') !== COVER_PLACEHOLDER) img.src = COVER_PLACEHOLDER; };
+    img.hidden = false;
   }
 
   async function loadEntry(meta) {
@@ -821,7 +835,8 @@
 
   function initAudio() {
     if (AC) return;
-    AC = new (window.AudioContext || window.webkitAudioContext)();
+    AC = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+    makeBlips();
 
     master = AC.createGain();
     master.gain.value = S.vol;
@@ -904,31 +919,30 @@
     return { t: Float32Array.from(times), s: Float32Array.from(str), n: times.length, lo: 0 };
   }
 
-  function blip(kind) {
-    if (!AC || S.sfx <= 0.001) return;
-    const o = AC.createOscillator();
-    const g = AC.createGain();
-    const t = AC.currentTime;
+  // Hit / miss sounds are rendered once into buffers, so playing one is a single cheap node
+  const BLIPS = {};
+  function makeBlips() {
+    const mk = (type, f0, f1, dur, vol) => {
+      const n = Math.round(AC.sampleRate * dur), buf = AC.createBuffer(1, n, AC.sampleRate), d = buf.getChannelData(0);
+      let ph = 0;
+      for (let i = 0; i < n; i++) {
+        const u = i / n, f = f0 * Math.pow(f1 / f0, Math.min(1, u * dur / (type === 'tri' ? 0.05 : 0.14)));
+        ph += f / AC.sampleRate;
+        const w = type === 'tri' ? 2 * Math.abs(2 * (ph % 1) - 1) - 1 : 2 * (ph % 1) - 1;
+        d[i] = w * vol * Math.pow(0.001 / vol, u);
+      }
+      return buf;
+    };
+    BLIPS.hit = mk('tri', 1500, 700, 0.08, 0.5);
+    BLIPS.miss = mk('saw', 150, 70, 0.17, 0.35);
+  }
 
-    if (kind === 'hit') {
-      o.type = 'triangle';
-      o.frequency.setValueAtTime(1500, t);
-      o.frequency.exponentialRampToValueAtTime(700, t + 0.05);
-      g.gain.setValueAtTime(0.5, t);
-      g.gain.exponentialRampToValueAtTime(0.001, t + 0.07);
-      o.start(t);
-      o.stop(t + 0.08);
-    } else {
-      o.type = 'sawtooth';
-      o.frequency.setValueAtTime(150, t);
-      o.frequency.exponentialRampToValueAtTime(70, t + 0.14);
-      g.gain.setValueAtTime(0.35, t);
-      g.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
-      o.start(t);
-      o.stop(t + 0.17);
-    }
-    o.connect(g);
-    g.connect(sfx);
+  function blip(kind) {
+    if (!AC || S.sfx <= 0.001 || !BLIPS.hit) return;
+    const s = AC.createBufferSource();
+    s.buffer = kind === 'hit' ? BLIPS.hit : BLIPS.miss;
+    s.connect(sfx);
+    s.start();
   }
 
   /* ==========================================================================
@@ -1398,7 +1412,7 @@
   }
 
   function drawBg() {
-    const dpr = 1, w = innerWidth, h = innerHeight;
+    const dpr = 0.6, w = innerWidth, h = innerHeight;     // soft background: lower resolution is invisible, and much cheaper
     if (bgC.width !== Math.round(w * dpr) || bgC.height !== Math.round(h * dpr)) {
       bgC.width = Math.round(w * dpr);
       bgC.height = Math.round(h * dpr);
@@ -1458,7 +1472,7 @@
      Main Game Engine & Loop
      ========================================================================== */
   const cv = $('#game');
-  const GL = window.PulseGL ? window.PulseGL.create(cv) : null;   // null => canvas 2D fallback
+  const GL = window.PulseGL ? window.PulseGL.create(cv, { desync: S.lowLat === 'on' }) : null;   // null => canvas 2D fallback
   const cx = GL ? null : cv.getContext('2d');
   let hudC = null, hudX = null, hudDpr = 1;
   if (GL) {
@@ -1471,8 +1485,31 @@
   }
   let g = null, gW = 0, gH = 0, gDpr = 1;
 
+  // Adaptive resolution: when frames take clearly longer than the display refresh, lower the render scale
+  const dyn = { s: 1, dts: new Float32Array(180), i: 0, n: 0, lastChange: 0, upWait: 4000, calm: 0 };
+  function adaptRes(dt) {
+    if (S.quality === 'potato' || !GL) return;
+    dyn.dts[dyn.i] = dt; dyn.i = (dyn.i + 1) % 180; if (dyn.n < 180) dyn.n++;
+    if (dyn.n < 60 || (dyn.i % 30)) return;
+    const a = Array.from(dyn.dts.subarray(0, dyn.n)).sort((x, y) => x - y);
+    const ref = clamp(a[Math.floor(a.length * 0.1)], 6.5, 16.9);   // display refresh interval
+    let avg = 0; for (let k = 0; k < 60; k++) avg += dyn.dts[(dyn.i - 1 - k + 180) % 180]; avg /= 60;
+    const now = performance.now();
+    if (avg > ref * 1.35 && dyn.s > 0.55 && now - dyn.lastChange > 1200) {
+      if (dyn.lastUp && now - dyn.lastUp < 8000) dyn.upWait = Math.min(60000, dyn.upWait * 2);  // went back up too early
+      dyn.s = Math.max(0.55, dyn.s * 0.85); dyn.lastChange = now; dyn.calm = 0; dyn.n = 0;
+      sizeGame();
+    } else if (avg < ref * 1.12 && dyn.s < 1) {
+      dyn.calm += 30;
+      if (dyn.calm * 16.7 > dyn.upWait && now - dyn.lastChange > 3000) {
+        dyn.s = Math.min(1, dyn.s * 1.1); dyn.lastChange = dyn.lastUp = now; dyn.calm = 0; dyn.n = 0;
+        sizeGame();
+      }
+    } else dyn.calm = 0;
+  }
+
   function sizeGame() {
-    gDpr = Math.min(qCap(), devicePixelRatio || 1);
+    gDpr = Math.min(qCap(), devicePixelRatio || 1) * (GL ? dyn.s : 1);
     gW = innerWidth;
     gH = innerHeight;
     if (GL) {
@@ -1559,6 +1596,7 @@
   }
 
   function beginGame(e, buf, rp) {
+    dyn.s = 1; dyn.n = 0; dyn.i = 0; dyn.calm = 0; dyn.upWait = 4000; dyn.lastUp = 0;
     const N = e.notes.length;
     g = {
       entry: e,
@@ -1683,6 +1721,15 @@
   }
   addEventListener('mousemove', e => onMove(e, false));
   addEventListener('pointerrawupdate', e => onMove(e, true));
+  if (!('onpointerrawupdate' in window)) {
+    // Browsers without raw events (Firefox, Safari): read every coalesced sample, not just one per frame
+    addEventListener('pointermove', e => {
+      if (!g || locked()) return;                         // locked mode keeps using mousemove deltas
+      const list = e.getCoalescedEvents ? e.getCoalescedEvents() : null;
+      if (list && list.length) for (const c of list) onMove(c, true);
+      else onMove(e, true);
+    });
+  }
 
   document.addEventListener('pointerlockchange', () => {
     if (locked()) {
@@ -1917,6 +1964,7 @@
     }
 
     if (GL) {
+      adaptRes(dtF);
       GL.render({
         W: gW, H: gH, t,
         notes: g.notes, states: g.states, hitAt: g.hitAt, approach: g.approach,
@@ -2504,6 +2552,13 @@
     if (screen === 'game') sizeGame();
   };
 
+  $('#sLat').value = S.lowLat;
+  $('#sLat').onchange = e => {
+    S.lowLat = e.target.value;
+    saveS();
+    toast('Reload the page to apply the display mode.');
+  };
+
   $('#sMouse').value = S.mouse;
   $('#sMouse').onchange = e => {
     S.mouse = e.target.value;
@@ -2563,7 +2618,7 @@
       kickEnv *= 0.9;
       stepVis(16);
       const slow = S.quality === 'potato';
-      if (!(tick & (slow ? 3 : 1))) drawBg();
+      if (!(tick & (slow ? 3 : 1)) && (slow || (tick & 1) === 0 || kickVis > 0.05)) drawBg();
       if (screen === 'lobby' && (!slow || !(tick & 1))) {
         drawViz();
         drawMini();
