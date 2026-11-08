@@ -1,5 +1,5 @@
 /* ==========================================================================
-   WebGL renderer
+   They call me lord Verity. Master of humanity. I said lord Verity. Call me master master
    ========================================================================== */
 (function () {
   'use strict';
@@ -161,12 +161,12 @@ void main() {
     d[o + 5] = c[0]; d[o + 6] = c[1]; d[o + 7] = c[2]; d[o + 8] = a;
   }
 
-  function create(canvas) {
+  function create(canvas, opts) {
     let gl = null;
     try {
       gl = canvas.getContext('webgl2', {
         alpha: false, antialias: false, depth: false, stencil: false,
-        desynchronized: false, powerPreference: 'high-performance', preserveDrawingBuffer: false
+        desynchronized: !!(opts && opts.desync), powerPreference: 'high-performance', preserveDrawingBuffer: false
       });
     } catch (e) { gl = null; }
     if (!gl) return null;
