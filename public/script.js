@@ -344,6 +344,7 @@
     const lastMs = dv.getUint32(30, true);
     const diff = dv.getUint8(42);
     const hasAudio = dv.getUint8(45);
+    const hasCover = dv.getUint8(46);
     const markerCount = dv.getUint32(38, true);
 
     const off = [];
@@ -444,7 +445,19 @@
       nps: notes.length / span
     };
 
-    return { meta, notes, audio: { bytes, mime } };
+    // Cover image (png / jpeg / webp / gif), optional
+    let cover = null;
+    const cOff = off[4], cLen = off[5];
+    if (hasCover && cLen > 8 && cOff > 0 && cOff + cLen <= buf.byteLength) {
+      const cb = u8.subarray(cOff, cOff + cLen);
+      const cm = cb[0] === 0x89 && cb[1] === 0x50 ? 'image/png'
+        : cb[0] === 0xff && cb[1] === 0xd8 ? 'image/jpeg'
+        : cb[0] === 0x52 && cb[1] === 0x49 && cb[8] === 0x57 ? 'image/webp'
+        : cb[0] === 0x47 && cb[1] === 0x49 ? 'image/gif' : null;
+      if (cm) cover = { bytes: cb, mime: cm };
+    }
+
+    return { meta, notes, audio: { bytes, mime }, cover };
   }
 
   function classify(m) {
@@ -745,6 +758,19 @@
      Map Cache
      ========================================================================== */
   const ENT = new Map();
+  // Object URL of the map's cover image (created on first use), or null when the map has none
+  function coverUrlOf(e) {
+    if (!e || !e.cover) return null;
+    if (!e.coverUrl) e.coverUrl = URL.createObjectURL(new Blob([e.cover.bytes], { type: e.cover.mime }));
+    return e.coverUrl;
+  }
+
+  function setCover(img, e) {
+    const u = coverUrlOf(e);
+    if (u) { if (img.getAttribute('src') !== u) img.src = u; img.hidden = false; }
+    else { img.hidden = true; img.removeAttribute('src'); }
+  }
+
   async function loadEntry(meta) {
     if (ENT.has(meta.id)) {
       const e = ENT.get(meta.id);
@@ -762,6 +788,8 @@
       meta,
       notes: p.notes,
       audio: p.audio,
+      cover: p.cover,
+      coverUrl: null,
       url: null,
       decoded: null,
       pStart: Math.max(0, p.notes[i].ms - 1500) / 1000
@@ -772,6 +800,7 @@
       const k = ENT.keys().next().value;
       const o = ENT.get(k);
       if (o.url) URL.revokeObjectURL(o.url);
+      if (o.coverUrl) URL.revokeObjectURL(o.coverUrl);
       ENT.delete(k);
     }
     return e;
@@ -1248,6 +1277,7 @@
         if (hov && hov.meta && hov.meta.id === m.id) paintCardBoard(r.scores);
       });
     }
+    setCover($('#cardCover'), hov && hov.entry);
     $('#liveTag').textContent = hov && hov.meta ? (hov.entry ? 'PREVIEW' : 'LOADING…') : '';
   }
 
@@ -1287,6 +1317,7 @@
       if (tok !== hovTok) return;
       hov.entry = e;
       $('#liveTag').textContent = 'PREVIEW';
+      setCover($('#cardCover'), e);
       startPreview(e);
       setTimeout(() => {
         if (tok === hovTok) decode(e).catch(() => {});
@@ -2109,6 +2140,7 @@
     $('#resStatus').textContent = win ? 'CLEARED' : 'FAILED';
     $('#resStatus').classList.toggle('fail', !win);
     $('#resTitle').textContent = g.meta.name;
+    setCover($('#resCover'), g.entry);
     $('#resMeta').textContent = (g.meta.folder === 'death' ? '助けて' : FOLDER[g.meta.folder]?.label || '') + ' · ' + g.meta.nps.toFixed(1) + ' notes/s';
 
     const gr = $('#resGrade');
