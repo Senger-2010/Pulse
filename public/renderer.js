@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Pulse! WebGL2 renderer :D
+      WebGL render thingy
    ========================================================================== */
 (function () {
   'use strict';
@@ -283,8 +283,8 @@ void main() {
           if (dt > f.approach) break;
           if (dt < -60) continue;
           const z = Math.max(0, dt * vz), s = K.s[i];
-          const a = Math.min(1, (1 - z / ZMAX) * (0.35 + 0.5 * s));
-          rect(LA, 0, 0, z, R, R, PINK, a, 2 + 2.5 * s * (1 - z / ZMAX));
+          const a = Math.min(1, (1 - z / ZMAX) * (0.12 + 0.2 * s));
+          rect(LA, 0, 0, z, R, R, PINK, a, 1.5 + 1.2 * s * (1 - z / ZMAX));
         }
       }
 
