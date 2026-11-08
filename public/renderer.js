@@ -1,5 +1,5 @@
 /* ==========================================================================
-      WebGL render thingy
+   WebGL renderer
    ========================================================================== */
 (function () {
   'use strict';
@@ -166,7 +166,7 @@ void main() {
     try {
       gl = canvas.getContext('webgl2', {
         alpha: false, antialias: false, depth: false, stencil: false,
-        desynchronized: true, powerPreference: 'high-performance', preserveDrawingBuffer: false
+        desynchronized: false, powerPreference: 'high-performance', preserveDrawingBuffer: false
       });
     } catch (e) { gl = null; }
     if (!gl) return null;
@@ -248,8 +248,9 @@ void main() {
            bass, kick, kicks:{t,s,n}, fx:{glow, rings, kickRings, trail, flat} }
     */
     api.resize = function (W, H, dpr) {
-      canvas.width = Math.max(1, Math.round(W * dpr));
-      canvas.height = Math.max(1, Math.round(H * dpr));
+      const w = Math.max(1, Math.round(W * dpr)), h = Math.max(1, Math.round(H * dpr));
+      if (canvas.width !== w) canvas.width = w;           // assigning width clears the canvas, so only when it changed
+      if (canvas.height !== h) canvas.height = h;
     };
 
     api.render = function (f) {
