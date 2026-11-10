@@ -1,5 +1,5 @@
 /* ==========================================================================
-   They call me lord Verity. Master of humanity. I said lord Verity. Call me master master
+   Render Engine. muhahahaha
    ========================================================================== */
 (function () {
   'use strict';
@@ -78,6 +78,56 @@ precision mediump float;
 in vec4 vC;
 out vec4 o;
 void main() { o = vec4(vC.rgb * vC.a, 1.0); }`;
+
+  // Modern note: ONE instance per note (position, size, colour, shape). The rounded shape,
+  // rim and soft glow are computed per pixel, so a note costs a single quad instead of ~10 lines.
+  const VS_NOTE = `#version 300 es
+${COMMON}
+layout(location = 0) in vec3 aC;
+layout(location = 1) in float aH;
+layout(location = 2) in vec4 aCol;
+layout(location = 3) in vec2 aShape;   // roundness 0..1, hollow 0/1
+uniform mediump float uGlow;
+out vec2 vP;
+out vec4 vCol;
+out vec3 vPar;
+void main() {
+  int id = gl_VertexID;
+  vec2 c = vec2(((id & 1) == 0) ? -1.0 : 1.0, (id >= 2) ? 1.0 : -1.0);
+  float s = uF / (aC.z + uD);
+  float hpx = aH * s;
+  float m = uGlow > 0.5 ? hpx * 0.6 + 8.0 : 1.5;
+  vec2 pc = proj(aC) + c * (hpx + m);
+  vP = c * (hpx + m);
+  vCol = aCol;
+  vPar = vec3(hpx, aShape.x, aShape.y);
+  gl_Position = toClip(pc);
+}`;
+
+  const FS_NOTE = `#version 300 es
+precision mediump float;
+in vec2 vP;
+in vec4 vCol;
+in vec3 vPar;
+uniform mediump float uDpr, uGlow;
+out vec4 o;
+void main() {
+  float hpx = vPar.x;
+  float r = clamp(vPar.y, 0.0, 1.0) * hpx;
+  vec2 q = abs(vP) - vec2(hpx - r);
+  float sd = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;   // signed distance in CSS px
+  float cov = clamp(0.5 - sd * uDpr, 0.0, 1.0);
+  float bw = max(1.6, hpx * 0.075);
+  float rim = clamp((sd + bw) * uDpr + 0.5, 0.0, 1.0) * cov;
+  float lit = smoothstep(1.1, -0.2, length(vP) / hpx);
+  vec3 body = vCol.rgb * (0.90 + 0.10 * lit);
+  vec3 rimC = mix(vCol.rgb, vec3(1.0), 0.45);
+  vec3 col = mix(body, rimC, rim * 0.9);
+  float fillA = mix(1.0, 0.10, vPar.z);
+  float A = cov * mix(fillA, 1.0, rim) * vCol.a;
+  float g = uGlow * exp(-max(sd, 0.0) / (hpx * 0.16 + 2.5)) * 0.30 * (1.0 - cov) * vCol.a;
+  o = vec4(col * A + vCol.rgb * g, A);
+}`;
 
   const VS_BG = `#version 300 es
 void main() {
@@ -161,7 +211,28 @@ void main() {
     d[o + 5] = c[0]; d[o + 6] = c[1]; d[o + 7] = c[2]; d[o + 8] = a;
   }
 
+  // Modern note instance: x y z half-size r g b a roundness hollow
+  function note(L, x, y, z, h, r, g, b, a, round, hollow) {
+    room(L);
+    const d = L.d, o = L.n++ * 10;
+    d[o] = x; d[o + 1] = y; d[o + 2] = z; d[o + 3] = h;
+    d[o + 4] = r; d[o + 5] = g; d[o + 6] = b; d[o + 7] = a;
+    d[o + 8] = round; d[o + 9] = hollow;
+  }
+
   function create(canvas, opts) {
+    // Compile everything on a throw-away canvas first: a canvas that once gave out a WebGL
+    // context can never hand out a 2D context, and the game needs that for its fallback.
+    try {
+      const probe = document.createElement('canvas').getContext('webgl2');
+      if (!probe) return null;
+      program(probe, VS_LINE, FS_LINE); program(probe, VS_QUAD, FS_QUAD); program(probe, VS_BG, FS_BG); program(probe, VS_NOTE, FS_NOTE);
+      const lose = probe.getExtension('WEBGL_lose_context');
+      if (lose) lose.loseContext();
+    } catch (e) {
+      console.warn('WebGL shaders failed, using canvas 2D:', e.message);
+      return null;
+    }
     let gl = null;
     try {
       gl = canvas.getContext('webgl2', {
@@ -171,11 +242,12 @@ void main() {
     } catch (e) { gl = null; }
     if (!gl) return null;
 
-    let lineP, quadP, bgP;
+    let lineP, quadP, bgP, noteP;
     try {
       lineP = program(gl, VS_LINE, FS_LINE);
       quadP = program(gl, VS_QUAD, FS_QUAD);
       bgP = program(gl, VS_BG, FS_BG);
+      noteP = program(gl, VS_NOTE, FS_NOTE);
     } catch (e) {
       console.warn('WebGL shaders failed, using canvas 2D:', e.message);
       return null;
@@ -200,10 +272,34 @@ void main() {
       gl.vertexAttribPointer(loc, size, gl.FLOAT, false, QS, off);
       gl.vertexAttribDivisor(loc, 1);
     });
+    const noteVAO = gl.createVertexArray(), noteBuf = gl.createBuffer();
+    gl.bindVertexArray(noteVAO);
+    gl.bindBuffer(gl.ARRAY_BUFFER, noteBuf);
+    const NS = 10 * 4;
+    [[0, 3, 0], [1, 1, 12], [2, 4, 16], [3, 2, 32]].forEach(([loc, size, off]) => {
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, size, gl.FLOAT, false, NS, off);
+      gl.vertexAttribDivisor(loc, 1);
+    });
     gl.bindVertexArray(null);
     const bgVAO = gl.createVertexArray();
+    const caps = new Map();      // buffer -> allocated bytes
+
+    // Upload without re-allocating the GPU buffer every frame
+    function upload(buf, L) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      const bytes = L.n * L.stride * 4;
+      let cap = caps.get(buf) || 0;
+      if (bytes > cap) {
+        cap = Math.max(4096, 1 << Math.ceil(Math.log2(bytes)));
+        gl.bufferData(gl.ARRAY_BUFFER, cap, gl.STREAM_DRAW);
+        caps.set(buf, cap);
+      }
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, L.d, 0, L.n * L.stride);
+    }
 
     const LA = makeList(15), LB = makeList(15), QB = makeList(9);   // A: tunnel (parallax), B: playfield
+    const LC = makeList(15), QC = makeList(9), NB = makeList(10);   // C: cursor (modern notes), NB: modern notes
     const api = { lost: false, gl };
 
     canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); api.lost = true; });
@@ -219,8 +315,7 @@ void main() {
       gl.uniform2f(lineP.u.uCam, cam ? f.cam.x : 0, cam ? f.cam.y : 0);
       gl.uniform1f(lineP.u.uDpr, f.dpr);
       gl.bindVertexArray(lineVAO);
-      gl.bindBuffer(gl.ARRAY_BUFFER, lineBuf);
-      gl.bufferData(gl.ARRAY_BUFFER, L.d.subarray(0, L.n * 15), gl.STREAM_DRAW);
+      upload(lineBuf, L);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, L.n);
     }
     function drawQuads(L, f) {
@@ -232,9 +327,25 @@ void main() {
       gl.uniform1f(quadP.u.uS0, f.s0);
       gl.uniform2f(quadP.u.uCam, 0, 0);
       gl.bindVertexArray(quadVAO);
-      gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
-      gl.bufferData(gl.ARRAY_BUFFER, L.d.subarray(0, L.n * 9), gl.STREAM_DRAW);
+      upload(quadBuf, L);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, L.n);
+    }
+
+    function drawNotes(L, f) {
+      if (!L.n) return;
+      gl.useProgram(noteP.p);
+      gl.uniform2f(noteP.u.uRes, f.W, f.H);
+      gl.uniform1f(noteP.u.uF, f.F);
+      gl.uniform1f(noteP.u.uD, D);
+      gl.uniform1f(noteP.u.uS0, f.s0);
+      gl.uniform2f(noteP.u.uCam, 0, 0);
+      gl.uniform1f(noteP.u.uDpr, f.dpr);
+      gl.uniform1f(noteP.u.uGlow, f.fx.glow ? 1 : 0);
+      gl.bindVertexArray(noteVAO);
+      upload(noteBuf, L);
+      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, L.n);
+      gl.blendFunc(gl.ONE, gl.ONE);
     }
 
     function lowerBound(a, ms) {
@@ -260,7 +371,9 @@ void main() {
       f.F = f.s0 * D;
       f.dpr = canvas.width / W;
       const vz = ZMAX / f.approach, t = f.t, kick = f.kick || 0, bass = f.bass || 0;
-      LA.n = 0; LB.n = 0; QB.n = 0;
+      LA.n = 0; LB.n = 0; QB.n = 0; LC.n = 0; QC.n = 0; NB.n = 0;
+      const ST = f.style;                                  // modern note style, or null for the legacy wireframe notes
+      const CL = ST ? LC : LB, CQ = ST ? QC : QB;
 
       /* ---- tunnel (moves with the parallax camera) ---- */
       const R = 2.7;
@@ -298,6 +411,28 @@ void main() {
       if (N && N.length) {
         const lo = lowerBound(N, t - 150), hi = Math.min(N.length - 1, lowerBound(N, t + f.approach + 10));
         const h = NOTE / 2;
+        if (ST) {
+          const hh = h * ST.scale, nc = ST.n, cols = ST.colors;
+          for (let i = hi; i >= lo; i--) {
+            const n = N[i], z = (n.ms - t) * vz, st = f.states[i], x = n.x - 1, y = n.y - 1;
+            let k = (i % nc) * 3, r = cols[k], g = cols[k + 1], b = cols[k + 2], a;
+            if (st === 1) {
+              const age = t - f.hitAt[i];
+              if (age < 0 || age >= 110) continue;
+              a = (1 - age / 110) * ST.opacity;              // same size, fades out fast
+              note(NB, x, y, 0, hh, r, g, b, a, ST.round, ST.hollow);
+              continue;
+            }
+            if (z > ZMAX) continue;
+            a = Math.min(1, (ZMAX - z) / 14);
+            if (st === 2) {
+              a *= Math.max(0, 1 + z / 2.4);
+              if (a <= 0.01) continue;
+              r = 0.55; g = 0.55; b = 0.62;
+            }
+            note(NB, x, y, Math.max(0, z), hh, r, g, b, a * ST.opacity, ST.round, ST.hollow);
+          }
+        } else
         for (let i = hi; i >= lo; i--) {
           const n = N[i], dt = n.ms - t, z = dt * vz, st = f.states[i], x = n.x - 1, y = n.y - 1;
           let c = (i & 1) ? CYAN : PINK;
@@ -335,12 +470,12 @@ void main() {
         if (fx.trail && f.trail) {
           for (let i = 0; i < f.trail.length; i++) {
             const u = (i + 1) / f.trail.length, hh = hc * (0.5 + u * 0.5);
-            quad(QB, f.trail[i].x, f.trail[i].y, 0, hh, hh, CYAN, u * 0.22);
+            quad(CQ, f.trail[i].x, f.trail[i].y, 0, hh, hh, CYAN, u * 0.22);
           }
         }
-        if (fx.glow) rect(LB, f.cur.x, f.cur.y, 0, hc, hc, CYAN, 0.25, 7);
-        quad(QB, f.cur.x, f.cur.y, 0, hc, hc, [1, 1, 1], 1);
-        rect(LB, f.cur.x, f.cur.y, 0, hc, hc, CYAN, 1, 2);
+        if (fx.glow) rect(CL, f.cur.x, f.cur.y, 0, hc, hc, CYAN, 0.25, 7);
+        quad(CQ, f.cur.x, f.cur.y, 0, hc, hc, [1, 1, 1], 1);
+        rect(CL, f.cur.x, f.cur.y, 0, hc, hc, CYAN, 1, 2);
       }
 
       /* ---- draw ---- */
@@ -359,6 +494,11 @@ void main() {
       drawLines(LA, f, true);
       drawLines(LB, f, false);
       drawQuads(QB, f);
+      if (ST) {
+        drawNotes(NB, f);
+        drawQuads(QC, f);
+        drawLines(LC, f, false);
+      }
     };
 
     return api;
