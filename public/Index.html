@@ -87,14 +87,16 @@
           <b>Esc</b><span>Pause</span>
           <b>Drop</b><span>Drag .sspm files onto the page to add them</span>
           <b>Totally</b><span>Not vibe coded.</span>
-                  <p>Change logs:</p>
+                            <p>Change logs:</p>
         <pre>
-[+] New 助けて map: かたぎり (katagiri) - CAT ROTATION
-[+] You can now watch replay clips of top players
-[+] Preview now also show cover image.
-[+] Rendering now use WebGL.
-[+] Improve performance and input delay attempt.
-(less input delay avaliable in settings)
+[+] New 助けて map: かたぎり (katagiri) - CAT ROTATION!
+[+] You can now watch replay clips of top players.
+[+] Preview now also shows cover image.
+[+] Remake rendering system.
+[+] Improved performance and input delay.
+(Less input delay available in settings)
+[+] Notes can now be customized.
+[+] Fixed replay clips only in client.
         </pre>
         </div>
         <button class="btn" id="btnStart">Start</button>
@@ -242,6 +244,55 @@
             <option value="low">Low (fastest)</option>
             <option value="potato">Potato (lowest)</option>
           </select>
+
+          <label for="sFps">Show FPS counter</label>
+          <input type="checkbox" id="sFps" class="chk">
+
+          <div class="set-sep">Notes</div>
+
+          <label for="sNote">Note style</label>
+          <span></span>
+          <select id="sNote">
+            <option value="solid">Modern (solid, lightweight)</option>
+            <option value="legacy">Legacy (neon wireframe)</option>
+          </select>
+
+          <div id="sNoteOpts" class="note-opts">
+            <div class="pal-title">Note colors</div>
+            <div class="pals" id="sPalWrap"></div>
+            <div class="cust" id="sCust" hidden>
+              <input type="color" aria-label="Custom color 1">
+              <input type="color" aria-label="Custom color 2">
+              <input type="color" aria-label="Custom color 3">
+              <input type="color" aria-label="Custom color 4">
+              <select id="sCustN" aria-label="How many custom colors">
+                <option value="1">1 color</option>
+                <option value="2">2 colors</option>
+                <option value="3">3 colors</option>
+                <option value="4">4 colors</option>
+              </select>
+            </div>
+            <div class="set">
+              <label for="sMesh">Note mesh</label>
+              <span></span>
+              <select id="sMesh">
+                <option value="rounded">Rounded</option>
+                <option value="square">Square</option>
+                <option value="circle">Circle</option>
+                <option value="outline">Outline</option>
+              </select>
+
+              <label for="sScale">Note scale</label>
+              <output id="oScale"></output>
+              <input type="range" id="sScale" min="0.5" max="1.5" step="0.05">
+
+              <label for="sOpac">Note opacity</label>
+              <output id="oOpac"></output>
+              <input type="range" id="sOpac" min="0.2" max="1" step="0.05">
+            </div>
+          </div>
+
+          <div class="set-sep">Display</div>
 
           <label for="sLat">Display mode</label>
           <span></span>
