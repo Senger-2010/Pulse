@@ -46,8 +46,38 @@
     offset: 0,
     mouse: 'auto',
     quality: 'balanced',
-    lowLat: 'off'
+    lowLat: 'off',
+    noteStyle: 'solid',        // 'solid' (modern) | 'legacy' (neon wireframe)
+    palette: 'neon',
+    custom: ['#ff3d71', '#35d6ff', '#ffd23d', '#6dff8c'],
+    customN: 2,
+    mesh: 'rounded',           // rounded | square | circle | outline
+    noteScale: 1,
+    noteOpacity: 1,
+    showFps: false
   };
+
+  /* Note colour palettes (modern notes cycle through the colours in order) */
+  const hueWheel = n => Array.from({ length: n }, (_, i) => hsl2hex(i / n * 360, 0.72, 0.62));
+  function hsl2hex(h, s, l) {
+    const a = s * Math.min(l, 1 - l), f = n => { const k = (n + h / 30) % 12; return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)); };
+    return '#' + [f(0), f(8), f(4)].map(v => Math.round(v * 255).toString(16).padStart(2, '0')).join('');
+  }
+  const PALETTES = [
+    { id: 'neon', name: 'Neon (default)', c: ['#ff3d71', '#35d6ff'] },
+    { id: 'cotton', name: 'Cotton Candy', c: ['#00fff0', '#ff93f5'] },
+    { id: 'veggie', name: 'Veggie Straws', c: ['#ffcd4f', '#ff7b94', '#e8de83'] },
+    { id: 'votes', name: 'Everybody Votes Channel', c: ['#fb94f1', '#9aff93'] },
+    { id: 'redblue', name: 'Red & Blue', c: ['#ff4444', '#4455ff'] },
+    { id: 'pastel', name: 'Pastel', c: ['#5ecbff', '#f7a9bd', '#ffffff'] },
+    { id: 'hue', name: 'Hue Wheel', c: hueWheel(12) },
+    { id: 'hueultra', name: 'Hue Wheel Ultra', c: hueWheel(25) },
+    { id: 'soul', name: 'SOUL', c: ['#ffffff'] },
+    { id: 'purple', name: 'purple!!!', c: ['#9a5cff'] },
+    { id: 'vortex', name: 'Vortex', c: ['#0b0612', '#3a1b46'] },
+    { id: 'wii', name: 'Wii Players', c: ['#0092ff', '#e6313a', '#13b813', '#ffaa00'] },
+    { id: 'custom', name: 'Custom', custom: true }
+  ];
 
   // Render scale per quality level (potato renders at 60% and lets the browser upscale)
   const qCap = () => ({ high: 2, balanced: 1.25, low: 1, potato: 0.6 })[S.quality] || 1.25;
@@ -68,6 +98,26 @@
     }
     return fxCache;
   };
+  // Modern-note style handed to the renderer (rebuilt only when a setting changes)
+  let styleCache = null;
+  const MESH = { rounded: [0.28, 0], square: [0.05, 0], circle: [1, 0], outline: [0.22, 1] };
+  const invalidateStyle = () => { styleCache = null; };
+  function noteStyle() {
+    if (S.noteStyle !== 'solid') return null;
+    if (styleCache) return styleCache;
+    const pal = PALETTES.find(p => p.id === S.palette) || PALETTES[0];
+    let list = pal.custom ? S.custom.slice(0, clamp(S.customN | 0, 1, 4)) : pal.c;
+    if (!list.length) list = PALETTES[0].c;
+    const colors = new Float32Array(list.length * 3);
+    list.forEach((h, i) => {
+      const v = parseInt(String(h).replace('#', ''), 16) || 0;
+      colors[i * 3] = (v >> 16 & 255) / 255; colors[i * 3 + 1] = (v >> 8 & 255) / 255; colors[i * 3 + 2] = (v & 255) / 255;
+    });
+    const m = MESH[S.mesh] || MESH.rounded;
+    styleCache = { colors, n: list.length, round: m[0], hollow: m[1], scale: clamp(+S.noteScale || 1, 0.5, 1.5), opacity: clamp(+S.noteOpacity || 1, 0.2, 1) };
+    return styleCache;
+  }
+
   // Cover shown when a map has no image of its own. Save the picture next to index.html as
   // default-cover.png and point this at it, because Discord links expire after a while.
   const DEFAULT_COVER = 'https://cdn.discordapp.com/attachments/985414411038642286/1568955605807530025/Untitled332.png?ex=6af1b346&is=6af061c6&hm=86b54c4b05aa39d628c2fdd6fcc5da1a5126c04312d41a5242fa67b774b8ae78&';
@@ -137,6 +187,89 @@
       } catch (e) {}
     }
   };
+
+  /* Replays shared through the server (Netlify Function /api/replays, see netlify/functions/replays.mjs).
+     Each map keeps the replays of its top REPLAY_TOP players; anyone can watch them. */
+  const ReplaysNet = (() => {
+    const API = '/api/replays';
+    const PENDING = 'rw-replay-pending';
+    const mem = new Map();                                 // mapId -> { t, list }
+    let flushing = false;
+    const rd = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch (e) { return d; } };
+    const wr = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
+
+    async function call(url, opts = {}) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 12000);
+      try {
+        const res = await fetch(url, { ...opts, signal: ctrl.signal });
+        let data = null;
+        try { data = await res.json(); } catch (e) {}
+        if (!res.ok || !data) { const err = new Error((data && data.error) || 'HTTP ' + res.status); err.status = res.status; throw err; }
+        return data;
+      } finally { clearTimeout(timer); }
+    }
+    const retryable = err => !err.status || err.status === 404 || err.status >= 500;
+
+    return {
+      // [{ name, school, score }] of the replays stored on the server for a map
+      async index(mapId, force) {
+        const m = mem.get(mapId);
+        if (m && !force && Date.now() - m.t < 15000) return m.list;
+        try {
+          const d = await call(API + '?map=' + encodeURIComponent(mapId));
+          mem.set(mapId, { t: Date.now(), list: d.replays || [] });
+          this.flush();
+          return d.replays || [];
+        } catch (e) { return m ? m.list : []; }
+      },
+
+      async fetch(ref) {
+        const q = '?map=' + encodeURIComponent(ref.mapId) + '&name=' + encodeURIComponent(ref.name) + '&school=' + encodeURIComponent(ref.school || '');
+        const d = await call(API + q);
+        return d.replay || null;
+      },
+
+      async upload(mapId, name, school, replay) {
+        const payload = { mapId, name, school, score: replay.score, replay };
+        try {
+          await call(API, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+          mem.delete(mapId);
+          return true;
+        } catch (err) {
+          if (retryable(err)) {                            // keep it and try again later
+            const q = rd(PENDING, []).filter(p => !(p.mapId === mapId && p.name === name && p.school === school));
+            q.push({ mapId, name, school, score: replay.score });
+            wr(PENDING, q.slice(-10));
+          }
+          return false;
+        }
+      },
+
+      // Upload replays that could not be sent earlier (the data is still in this browser)
+      async flush() {
+        if (flushing) return;
+        flushing = true;
+        try {
+          let q = rd(PENDING, []);
+          while (q.length) {
+            const p = q[0], raw = Replays.get(Replays.key(p.mapId, p.name, p.school));
+            if (raw && raw.score === p.score) {
+              try { await call(API, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...p, replay: raw }) }); mem.delete(p.mapId); }
+              catch (err) { if (retryable(err)) break; }
+            }
+            q = q.slice(1);
+            wr(PENDING, q);
+          }
+        } finally { flushing = false; }
+      },
+
+      async admin(params) {
+        try { return await call(API + '?' + new URLSearchParams(params), { method: 'DELETE', headers: { 'x-admin-key': Leaderboard.adminKey() } }); }
+        catch (e) { return null; }
+      }
+    };
+  })();
 
   const Leaderboard = (() => {
     const API = '/api/scores';
@@ -269,6 +402,7 @@
         });
         mem.clear();
         writeLS(CACHE_KEY, {});
+        ReplaysNet.admin(params);                          // the replays of deleted scores go too
         return data;
       }
     };
@@ -1968,7 +2102,7 @@
       GL.render({
         W: gW, H: gH, t,
         notes: g.notes, states: g.states, hitAt: g.hitAt, approach: g.approach,
-        cur: g.cur, trail: g.trail, cam: g.cam,
+        cur: g.cur, trail: g.trail, cam: g.cam, style: noteStyle(),
         bass: bassVis, kick: kickVis, kicks: K, fx: fxFor()
       });
       g.s0 = Math.min(gH * 0.17, gW * 0.13);
@@ -2106,19 +2240,23 @@
     for (let i = 0; i < N; i++) {
       bytes[M * 4 + i] = gg.states[i] === 1 ? Math.round(clamp(gg.hitAt[i] - gg.notes[i].ms, 0, MAX_LATE_TIME)) : (gg.states[i] === 2 ? 255 : 254);
     }
-    const meta = { v: 1, M, N, endT: Math.round(t), win, approach: gg.approach, label: currentPlayer.name || 'Anonymous', score: gg.score, gz: false };
+    const meta = { v: 1, M, N, endT: Math.round(t), win, approach: gg.approach, label: (currentPlayer.name || 'Anonymous') + (currentPlayer.school ? ' (' + currentPlayer.school + ')' : ''), score: gg.score, gz: false };
     try {
       let out = bytes;
       if (typeof CompressionStream !== 'undefined') { out = await pipeBytes(bytes, new CompressionStream('gzip')); meta.gz = true; }
       meta.d = b64enc(out);
       Replays.put(rid, meta);
       if (scores && scores.length) Replays.prune(mapId, scores);
+      ReplaysNet.upload(mapId, currentPlayer.name, currentPlayer.school, meta);
     } catch (e) {}
   }
 
-  async function unpackReplay(rid) {
-    const raw = Replays.get(rid);
-    if (!raw) throw new Error('Replay data is missing');
+  async function unpackReplay(ref) {
+    let raw = Replays.get(Replays.key(ref.mapId, ref.name, ref.school));
+    if (!raw || raw.score !== ref.score) {
+      try { raw = await ReplaysNet.fetch(ref); } catch (e) { raw = null; }
+    }
+    if (!raw) throw new Error('Replay data is not available');
     let u8 = b64dec(raw.d);
     if (raw.gz) u8 = await pipeBytes(u8, new DecompressionStream('gzip'));
     const { M, N } = raw;
@@ -2130,7 +2268,7 @@
       x[i] = px / 10000; y[i] = py / 10000;
     }
     if (!M) { x[0] = 0; y[0] = 0; }
-    return { rid, M: Math.max(1, M), x, y, o: u8.slice(M * 4, M * 4 + N), endT: raw.endT, win: raw.win, approach: raw.approach, label: raw.label };
+    return { ref, M: Math.max(1, M), x, y, o: u8.slice(M * 4, M * 4 + N), endT: raw.endT, win: raw.win, approach: raw.approach, label: raw.label };
   }
 
   function openLeaderboardFor(id) { openLeaderboard(id); }
@@ -2333,7 +2471,7 @@
   $('#btnBack').onclick = toLobby;
   $('#btnReplay').onclick = () => { const m = g.meta; g.over = true; startGame(m); };
   $('#pResume').onclick = resumeGame;
-  $('#pRestart').onclick = () => { const m = g.meta, rid = g.replay && g.replay.rid; stopSource(); g.over = true; startGame(m, rid); };
+  $('#pRestart').onclick = () => { const m = g.meta, rid = g.replay && g.replay.ref; stopSource(); g.over = true; startGame(m, rid); };
   $('#pQuit').onclick = toLobby;
 
   /* ==========================================================================
@@ -2408,8 +2546,8 @@
     scores.forEach((s, idx) => {
       const mine = (s.name + '|' + s.school).toLowerCase() === me;
       const rkey = Replays.key(mapId, s.name, s.school);
-      const rk = idx < REPLAY_TOP && Replays.scoreOf(rkey) === s.score
-        ? `<button class="ghost rp" data-rk="${esc(rkey)}">&#9654; Watch</button>` : '';
+      const rk = idx < REPLAY_TOP
+        ? `<span class="rpc" data-n="${esc(s.name)}" data-s="${esc(s.school)}" data-sc="${s.score}">${Replays.scoreOf(rkey) === s.score ? '<button class="ghost rp">&#9654; Watch</button>' : ''}</span>` : '';
       html += `<tr class="${mine ? 'me' : ''}">
         <td>${idx + 1}</td>
         <td><b>${esc(s.name)}</b></td>
@@ -2422,13 +2560,23 @@
       </tr>`;
     });
 
+    listEl.dataset.map = String(mapId);
     listEl.innerHTML = html + '</tbody></table>';
     listEl.onclick = ev => {
-      const b = ev.target.closest('button[data-rk]');
+      const b = ev.target.closest('.rpc button');
       if (!b) return;
-      const meta = LIB.find(m => m.id === mapId);
-      if (meta) startGame(meta, b.dataset.rk);
+      const c = b.parentElement, meta = LIB.find(m => m.id === mapId);
+      if (meta) startGame(meta, { mapId, name: c.dataset.n, school: c.dataset.s, score: +c.dataset.sc });
     };
+    // Replays other people recorded live on the server: show Watch for every top-3 row that has one
+    if (!offline) ReplaysNet.index(mapId).then(list => {
+      if (listEl.dataset.map !== String(mapId)) return;
+      listEl.querySelectorAll('.rpc').forEach(c => {
+        if (c.firstChild) return;
+        const ok = list.some(r => r.name === c.dataset.n && (r.school || '') === c.dataset.s && r.score === +c.dataset.sc);
+        if (ok) c.innerHTML = '<button class="ghost rp">&#9654; Watch</button>';
+      });
+    });
   }
 
   $('#lbMapSelect').onchange = e => updateLeaderboardView(e.target.value, true);
@@ -2552,6 +2700,61 @@
     if (screen === 'game') sizeGame();
   };
 
+  // Note style, palette, mesh, scale and opacity
+  const refreshNoteUi = () => {
+    $('#sNote').value = S.noteStyle;
+    document.querySelectorAll('#sPalWrap [data-pal]').forEach(b => b.classList.toggle('on', b.dataset.pal === S.palette));
+    $('#sCust').hidden = S.palette !== 'custom';
+    $('#sNoteOpts').classList.toggle('dim', S.noteStyle !== 'solid');
+  };
+  const palWrap = $('#sPalWrap');
+  for (const p of PALETTES) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'pal';
+    b.dataset.pal = p.id;
+    b.title = p.name;
+    b.innerHTML = '<span class="pn"></span><span class="sw"></span>';
+    b.firstChild.textContent = p.name;
+    b.lastChild.dataset.id = p.id;
+    palWrap.appendChild(b);
+    b.onclick = () => { S.palette = p.id; invalidateStyle(); saveS(); paintPalettes(); refreshNoteUi(); };
+  }
+  function paintPalettes() {
+    palWrap.querySelectorAll('.sw').forEach(sw => {
+      const p = PALETTES.find(x => x.id === sw.dataset.id);
+      const list = p.custom ? S.custom.slice(0, clamp(S.customN | 0, 1, 4)) : p.c;
+      if (list.length > 6) {                               // wheels: little grid of squares
+        const cols = Math.ceil(Math.sqrt(list.length));
+        sw.style.display = 'grid';
+        sw.style.gridTemplateColumns = 'repeat(' + cols + ', 1fr)';
+        sw.innerHTML = list.map(c => '<i style="background:' + c + '"></i>').join('');
+      } else {
+        sw.style.display = 'flex';
+        sw.innerHTML = list.map(c => '<i style="background:' + c + ';flex:1"></i>').join('');
+      }
+    });
+  }
+  const custBox = $('#sCust');
+  custBox.querySelectorAll('input[type=color]').forEach((inp, i) => {
+    inp.value = S.custom[i] || '#ffffff';
+    inp.oninput = () => { S.custom[i] = inp.value; invalidateStyle(); saveS(); paintPalettes(); };
+  });
+  $('#sCustN').value = String(S.customN);
+  $('#sCustN').onchange = e => { S.customN = +e.target.value; invalidateStyle(); saveS(); paintPalettes(); };
+  $('#sNote').onchange = e => { S.noteStyle = e.target.value; invalidateStyle(); saveS(); refreshNoteUi(); };
+  $('#sMesh').value = S.mesh;
+  $('#sMesh').onchange = e => { S.mesh = e.target.value; invalidateStyle(); saveS(); };
+  const sc = $('#sScale'), op = $('#sOpac');
+  sc.value = S.noteScale; $('#oScale').textContent = (+S.noteScale).toFixed(2) + 'x';
+  sc.oninput = () => { S.noteScale = +sc.value; $('#oScale').textContent = S.noteScale.toFixed(2) + 'x'; invalidateStyle(); saveS(); };
+  op.value = S.noteOpacity; $('#oOpac').textContent = Math.round(S.noteOpacity * 100) + '%';
+  op.oninput = () => { S.noteOpacity = +op.value; $('#oOpac').textContent = Math.round(S.noteOpacity * 100) + '%'; invalidateStyle(); saveS(); };
+  $('#sFps').checked = !!S.showFps;
+  $('#sFps').onchange = e => { S.showFps = e.target.checked; saveS(); fpsEl.hidden = !S.showFps; };
+  paintPalettes();
+  refreshNoteUi();
+
   $('#sLat').value = S.lowLat;
   $('#sLat').onchange = e => {
     S.lowLat = e.target.value;
@@ -2607,8 +2810,30 @@
   };
 
   let tick = 0;
-  function loop() {
+  // FPS counter (Settings > Show FPS). Browsers only run animation frames at the display's refresh rate.
+  const fpsEl = document.createElement('div');
+  fpsEl.id = 'fps';
+  fpsEl.hidden = true;
+  document.getElementById('app').appendChild(fpsEl);
+  let fpsT = 0, fpsN = 0, fpsMin = 1e9, fpsLast = 0, fpsHz = 0;
+  function fpsStep(now) {
+    if (fpsLast) { const d = now - fpsLast; fpsMin = Math.min(fpsMin, d); fpsN++; }
+    fpsLast = now;
+    if (!fpsT) fpsT = now;
+    if (now - fpsT >= 500) {
+      if (S.showFps) {
+        fpsEl.hidden = false;
+        const fps = Math.round(fpsN * 1000 / (now - fpsT));
+        fpsHz = Math.round(1000 / Math.max(2, fpsMin));
+        fpsEl.textContent = fps + ' fps · display ' + fpsHz + ' Hz' + (GL ? ' · ' + (S.noteStyle === 'solid' ? 'solid' : 'legacy') + ' notes' + (dyn.s < 1 ? ' · res ' + Math.round(dyn.s * 100) + '%' : '') : ' · canvas 2D');
+      } else fpsEl.hidden = true;
+      fpsT = now; fpsN = 0; fpsMin = 1e9;
+    }
+  }
+
+  function loop(now) {
     requestAnimationFrame(loop);
+    fpsStep(now || performance.now());
     tick++;
     if (screen === 'game' && g) {
       if (!(tick & 1)) sampleAudio();
