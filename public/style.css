@@ -915,3 +915,121 @@ canvas {
   flex: 1;
   min-width: 0;
 }
+
+/* Settings: note styles */
+.set-sep {
+  grid-column: 1 / -1;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.chk {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--cyan);
+  justify-self: end;
+}
+
+.note-opts {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.note-opts.dim .pals,
+.note-opts.dim .cust,
+.note-opts.dim .pal-title {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.pal-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.pals {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(74px, 1fr));
+  gap: 8px;
+}
+
+.pal {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+  padding: 5px;
+  background: var(--panel2);
+  border: 2px solid var(--line);
+  border-radius: 8px;
+  min-width: 0;
+}
+
+.pal:hover { border-color: var(--dim); }
+.pal.on { border-color: var(--cyan); box-shadow: 0 0 0 1px var(--cyan); }
+
+.pal .pn {
+  font-size: 10px;
+  line-height: 1.15;
+  color: var(--dim);
+  min-height: 2.3em;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.pal .sw {
+  height: 38px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #000;
+}
+
+.pal .sw i { display: block; min-width: 0; }
+
+.cust {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.cust input[type=color] {
+  width: 40px;
+  height: 32px;
+  padding: 0;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.cust select {
+  background: var(--panel2);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+
+.note-opts .set { margin-top: 2px; }
+
+#fps {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  z-index: 70;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.6);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--cyan);
+  pointer-events: none;
+}
