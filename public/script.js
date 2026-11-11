@@ -24,9 +24,7 @@
   /* ==========================================================================
      Configuration & Constants
      ========================================================================== */
-  // Adjustable timing window limit (in milliseconds) - adjustable only in script.js
   const MAX_LATE_TIME = 70;
-  // How strongly kicks flash the background / grid (0 = off, 1 = full). Adjustable only in script.js
   const KICK_STRENGTH = 0.4;
 
   const FOLDERS = [
@@ -51,13 +49,25 @@
     palette: 'neon',
     custom: ['#ff3d71', '#35d6ff', '#ffd23d', '#6dff8c'],
     customN: 2,
-    mesh: 'rounded',           // rounded | square | circle | outline
+    mesh: 'rounded',           // rounded | square | circle
     noteScale: 1,
     noteOpacity: 1,
+    noteFill: 1,               // opacity of the inside of a note (the rim stays solid)
+    cursorShape: 'circle',     // circle | square | image
+    cursorImage: '',           // data URL of the custom cursor image
+    cursorColorMode: 'note',   // note (colour of the next note) | custom
+    cursorColor: '#ffffff',
+    cursorScale: 1,
+    cursorSpin: 0,             // degrees per second
+    trailOn: true,
+    smartTrail: true,          // skip trail points that would sit on top of each other
+    trailFade: 'both',         // scale | fade | both
+    trailDetail: 16,           // trail points
+    trailTime: 0.08,           // seconds
     showFps: false
   };
 
-  /* Note colour palettes (modern notes cycle through the colours in order) */
+  /* note color palettes (modern notes cycle through the colors in order) */
   const hueWheel = n => Array.from({ length: n }, (_, i) => hsl2hex(i / n * 360, 0.72, 0.62));
   function hsl2hex(h, s, l) {
     const a = s * Math.min(l, 1 - l), f = n => { const k = (n + h / 30) % 12; return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)); };
@@ -79,10 +89,9 @@
     { id: 'custom', name: 'Custom', custom: true }
   ];
 
-  // Render scale per quality level (potato renders at 60% and lets the browser upscale)
+  // render scale
   const qCap = () => ({ high: 2, balanced: 1.25, low: 1, potato: 0.6 })[S.quality] || 1.25;
   const lowFxOn = () => S.quality === 'low' || S.quality === 'potato';
-  // What the WebGL renderer may draw at each quality level
   let fxCache = null, fxQ = '';
   const fxFor = () => {                                   // cached: no allocation per frame
     if (fxQ !== S.quality) {
@@ -98,10 +107,93 @@
     }
     return fxCache;
   };
-  // Modern-note style handed to the renderer (rebuilt only when a setting changes)
+  // modern note style handed to the renderer
   let styleCache = null;
-  const MESH = { rounded: [0.28, 0], square: [0.05, 0], circle: [1, 0], outline: [0.22, 1] };
+  const MESH = { rounded: 0.28, square: 0.05, circle: 1 };
   const invalidateStyle = () => { styleCache = null; };
+  /* ----- cursor: shape, colour, spin and trail ----- */
+  const CPINK = [1.0, 0.24, 0.44], CCYAN = [0.21, 0.84, 1.0];
+  const trailBuf = new Float32Array(4 * 64);
+  const curOut = { shape: 0, scale: 1, trail: trailBuf, tn: 0, x: 0, y: 0, ang: 0, r: 1, g: 1, b: 1 };
+  let spinA = 0, cursorImgOk = false, curRGB = [1, 1, 1], curRGBKey = '';
+
+  function syncCursorImage() {
+    cursorImgOk = false;
+    if (!GL || !GL.setCursorImage) return;
+    if (!S.cursorImage) { GL.setCursorImage(null); return; }
+    const im = new Image();
+    im.onload = () => { GL.setCursorImage(im); cursorImgOk = true; };
+    im.onerror = () => GL.setCursorImage(null);
+    im.src = S.cursorImage;
+  }
+
+  function hexRGB(h) {
+    if (h !== curRGBKey) { const v = parseInt(h.slice(1), 16) || 0; curRGB = [(v >> 16 & 255) / 255, (v >> 8 & 255) / 255, (v & 255) / 255]; curRGBKey = h; }
+    return curRGB;
+  }
+
+  // color of the next note that is still to be hit
+  function nextNoteRGB() {
+    const i = Math.min(g.lo, Math.max(0, g.N - 1)), st = noteStyle();
+    if (st) { const k = (i % st.n) * 3; return [st.colors[k], st.colors[k + 1], st.colors[k + 2]]; }
+    return (i & 1) ? CCYAN : CPINK;
+  }
+
+  // trail point `age` ms behind the head
+  function replayPos(tms, out, o) {
+    const R = g.replay, f = Math.max(0, tms) / REC_DT, i = Math.min(R.M - 1, f | 0), j = Math.min(R.M - 1, i + 1), u = Math.min(1, f - i);
+    out[o] = lerp(R.x[i], R.x[j], u); out[o + 1] = lerp(R.y[i], R.y[j], u);
+  }
+
+  function buildCursor(t, pfNow, dtF, fx) {
+    const C = curOut;
+    C.shape = S.cursorShape === 'square' ? 1 : (S.cursorShape === 'image' && cursorImgOk ? 2 : 0);
+    C.scale = S.cursorScale;
+    spinA = (spinA + S.cursorSpin * Math.PI / 180 * dtF / 1000) % (Math.PI * 2);
+    C.ang = spinA;
+    C.x = g.cur.x; C.y = g.cur.y;
+    let rgb;
+    if (S.cursorColorMode === 'custom') rgb = hexRGB(S.cursorColor);
+    else rgb = C.shape === 2 ? [1, 1, 1] : nextNoteRGB();          // an image keeps its own color
+    C.r = rgb[0]; C.g = rgb[1]; C.b = rgb[2];
+
+    let tn = 0;
+    if (S.trailOn && fx.trail) {
+      const detail = S.trailDetail | 0, T = S.trailTime * 1000, mode = S.trailFade, smart = S.smartTrail;
+      let lx = C.x, ly = C.y;
+      let j = (g.hI - 1 + HN) % HN, cnt = g.hC;
+      const tmp = [0, 0];
+      for (let k = 1; k <= detail; k++) {
+        const age = T * k / detail;
+        let px, py;
+        if (g.replay) { replayPos(t - age, tmp, 0); px = tmp[0]; py = tmp[1]; }
+        else if (!g.hC) { px = C.x; py = C.y; }
+        else {
+          const pt = pfNow - age;
+          while (cnt > 1 && g.hT[(j - 1 + HN) % HN] > pt) { j = (j - 1 + HN) % HN; cnt--; }
+          if (g.hT[j] <= pt || cnt <= 1) { px = g.hX[j]; py = g.hY[j]; }
+          else {
+            const jp = (j - 1 + HN) % HN, span = g.hT[j] - g.hT[jp], u = span > 0 ? (pt - g.hT[jp]) / span : 1;
+            px = lerp(g.hX[jp], g.hX[j], u); py = lerp(g.hY[jp], g.hY[j], u);
+          }
+        }
+        if (smart && (px - lx) * (px - lx) + (py - ly) * (py - ly) < 3e-5) continue;   // would sit under the previous point
+        lx = px; ly = py;
+        const u = 1 - k / detail;
+        const o = tn * 4;
+        trailBuf[o] = px; trailBuf[o + 1] = py;
+        trailBuf[o + 2] = mode === 'fade' ? 1 : (mode === 'scale' ? 0.25 + 0.75 * u : 0.4 + 0.6 * u);
+        trailBuf[o + 3] = mode === 'scale' ? 0.5 : u * 0.55;
+        tn++;
+      }
+      for (let a = 0, b = tn - 1; a < b; a++, b--) {                // oldest first
+        for (let q = 0; q < 4; q++) { const v = trailBuf[a * 4 + q]; trailBuf[a * 4 + q] = trailBuf[b * 4 + q]; trailBuf[b * 4 + q] = v; }
+      }
+    }
+    C.tn = tn;
+    return C;
+  }
+
   function noteStyle() {
     if (S.noteStyle !== 'solid') return null;
     if (styleCache) return styleCache;
@@ -113,22 +205,37 @@
       const v = parseInt(String(h).replace('#', ''), 16) || 0;
       colors[i * 3] = (v >> 16 & 255) / 255; colors[i * 3 + 1] = (v >> 8 & 255) / 255; colors[i * 3 + 2] = (v & 255) / 255;
     });
-    const m = MESH[S.mesh] || MESH.rounded;
-    styleCache = { colors, n: list.length, round: m[0], hollow: m[1], scale: clamp(+S.noteScale || 1, 0.5, 1.5), opacity: clamp(+S.noteOpacity || 1, 0.2, 1) };
+    styleCache = { colors, n: list.length, round: MESH[S.mesh] || MESH.rounded, fill: clamp(+S.noteFill, 0, 1), scale: clamp(+S.noteScale || 1, 0.5, 1.5), opacity: clamp(+S.noteOpacity || 1, 0.2, 1) };
     return styleCache;
   }
 
-  // Cover shown when a map has no image of its own. Save the picture next to index.html as
-  // default-cover.png and point this at it, because Discord links expire after a while.
+  // default corver image
   const DEFAULT_COVER = 'https://cdn.discordapp.com/attachments/985414411038642286/1568955605807530025/Untitled332.png?ex=6af1b346&is=6af061c6&hm=86b54c4b05aa39d628c2fdd6fcc5da1a5126c04312d41a5242fa67b774b8ae78&';
   const COVER_PLACEHOLDER = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2c2250"/><stop offset="1" stop-color="#ff3d71"/></linearGradient></defs><rect width="100" height="100" fill="url(#g)"/><rect x="32" y="32" width="36" height="36" fill="none" stroke="#35d6ff" stroke-width="4"/></svg>');
   const REDUCE = matchMedia('(prefers-reduced-motion: reduce)');
   const S = { ...DEF };
 
-  // Load Saved Settings from LocalStorage
+  // load saved settings
   try {
     Object.assign(S, JSON.parse(localStorage.getItem('rw-settings') || '{}'));
   } catch (e) {}
+
+  (function sanitize() {
+    const num = (k, lo, hi) => { S[k] = clamp(Number.isFinite(+S[k]) ? +S[k] : DEF[k], lo, hi); };
+    const pick = (k, list) => { if (!list.includes(S[k])) S[k] = DEF[k]; };
+    const hex = v => typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v);
+    if (S.mesh === 'outline') { S.mesh = 'rounded'; S.noteFill = 0.1; }   // the old Outline mesh is now "inside opacity"
+    pick('noteStyle', ['solid', 'legacy']); pick('mesh', ['rounded', 'square', 'circle']);
+    pick('palette', PALETTES.map(p => p.id)); pick('lowLat', ['on', 'off']); pick('quality', ['high', 'balanced', 'low', 'potato']);
+    pick('cursorShape', ['circle', 'square', 'image']); pick('cursorColorMode', ['note', 'custom']); pick('trailFade', ['scale', 'fade', 'both']);
+    if (!Array.isArray(S.custom)) S.custom = DEF.custom.slice();
+    S.custom = DEF.custom.map((d, i) => hex(S.custom[i]) ? S.custom[i] : d);
+    if (!hex(S.cursorColor)) S.cursorColor = DEF.cursorColor;
+    if (typeof S.cursorImage !== 'string' || !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(S.cursorImage) || S.cursorImage.length > 900000) S.cursorImage = '';
+    num('customN', 1, 4); num('noteScale', 0.5, 1.5); num('noteOpacity', 0.2, 1); num('noteFill', 0, 1);
+    num('cursorScale', 0.2, 3); num('cursorSpin', 0, 720); num('trailDetail', 2, 48); num('trailTime', 0.02, 0.5);
+    S.trailOn = !!S.trailOn; S.smartTrail = !!S.smartTrail; S.showFps = !!S.showFps;
+  })();
 
   const saveS = () => {
     try {
@@ -149,16 +256,13 @@
   const COLS = ['255,61,113', '53,214,255'];
 
   /* ==========================================================================
-     Leaderboard (stored on the server via the Netlify Function /api/scores,
-     with a local cache + retry queue so the game still works offline)
+     Leaderboard
      ========================================================================== */
   let currentPlayer = {
     name: localStorage.getItem('oh-player-name') || '',
     school: localStorage.getItem('oh-player-school') || ''
   };
-
-  /* Gameplay replays of the top REPLAY_TOP players of each map.
-     Kept in this browser (one localStorage key per map + player); the server only stores scores. */
+  
   const REPLAY_TOP = 3;
   const Replays = {
     P: 'rw-replay:',
@@ -175,7 +279,7 @@
         return true;
       } catch (e) { return false; }
     },
-    // Drop this map's replays of players who are no longer in its top REPLAY_TOP
+    // Drop this maps replays of players who are no longer in its top REPLAY_TOP
     prune(mapId, scores) {
       try {
         const keep = new Set(scores.slice(0, REPLAY_TOP).map(s => this.key(mapId, s.name, s.school)));
@@ -188,8 +292,7 @@
     }
   };
 
-  /* Replays shared through the server (Netlify Function /api/replays, see netlify/functions/replays.mjs).
-     Each map keeps the replays of its top REPLAY_TOP players; anyone can watch them. */
+  
   const ReplaysNet = (() => {
     const API = '/api/replays';
     const PENDING = 'rw-replay-pending';
@@ -246,7 +349,7 @@
         }
       },
 
-      // Upload replays that could not be sent earlier (the data is still in this browser)
+      // upload replays that could not be sent earlier
       async flush() {
         if (flushing) return;
         flushing = true;
@@ -316,10 +419,10 @@
       body: JSON.stringify(payload)
     });
 
-    // Network problems, a missing API (404) and 5xx are worth retrying later.
+    // Network problems, a missing API (404) and 5xx are worth retrying later
     const retryable = err => !err.status || err.status === 404 || err.status >= 500;
 
-    // Merge an entry into a cached list the same way the server does.
+    // merge an entry into a cached list the same way the server does
     function mergeLocal(list, entry) {
       const k = pkey(entry);
       const prev = list.find(e => pkey(e) === k);
@@ -332,7 +435,7 @@
     }
 
     return {
-      // Last known scores for a map, or null if we've never seen any.
+      // last known scores for a map or null if never seen any
       peek(mapId) {
         const m = mem.get(mapId);
         if (m) return m.scores;
@@ -370,7 +473,7 @@
         }
       },
 
-      // Upload scores that were saved while the server was unreachable.
+      // upload scores that were saved while the server was unreachable
       async flush() {
         if (flushing) return;
         flushing = true;
@@ -380,9 +483,9 @@
             try {
               await post(q[0]);
             } catch (err) {
-              if (retryable(err)) break; // still offline, try again later
+              if (retryable(err)) break; // stilll offline, try again later
             }
-            q = q.slice(1); // sent, or rejected for good
+            q = q.slice(1); // sent or reject for good
             writeLS(PENDING_KEY, q);
           }
         } finally {
@@ -402,16 +505,13 @@
         });
         mem.clear();
         writeLS(CACHE_KEY, {});
-        ReplaysNet.admin(params);                          // the replays of deleted scores go too
+        ReplaysNet.admin(params);                          // the replays of deleted scores gone too
         return data;
       }
     };
   })();
 
-  // Console tools for the organiser:
-  //   rwLeaderboard.setKey('your ADMIN_KEY')
-  //   rwLeaderboard.clearMap('Map name or id')   rwLeaderboard.deleteName('Alex')
-  //   rwLeaderboard.deleteEntry('Map name or id', 'Alex', 'School')   rwLeaderboard.clearAll()
+  // Console tools (I know who lookin at ts btw)
   const resolveMapId = x => {
     const lower = String(x).toLowerCase();
     const m = LIB.find(m => m.id === x || m.name.toLowerCase() === lower);
@@ -591,7 +691,7 @@
       nps: notes.length / span
     };
 
-    // Cover image (png / jpeg / webp / gif), optional
+    // Cover image
     let cover = null;
     const cOff = off[4], cLen = off[5];
     if (hasCover && cLen > 8 && cOff > 0 && cOff + cLen <= buf.byteLength) {
@@ -615,8 +715,7 @@
   }
 
   /* ==========================================================================
-     Storage Subsystem (IndexedDB with Memory Fallback)
-     Blobs are stored with a version tag so a replaced server map is re-downloaded.
+     Storage Subsystem
      ========================================================================== */
   const Store = (() => {
     let db = null;
@@ -642,7 +741,7 @@
       t.onerror = t.onabort = () => rej(t.error);
     });
 
-    // A stored blob is valid if no version is requested/stored, or the versions match.
+    // a stored blob is valid if no version is requested/stored or the versions match
     const okBlob = (r, ver) => (r && (ver == null || r.ver == null || r.ver === ver)) ? r.data : null;
 
     return {
@@ -705,7 +804,7 @@
   let LIB = [];
   async function refreshLib() {
     try { LIB = await Store.all(); } catch (e) { LIB = []; }
-    // Apply difficulty overrides from local storage
+    // apply difficulty overrides from local storage
     for (const m of LIB) {
       const savedFolder = DiffOverrides.get(m.id);
       if (savedFolder) m.folder = savedFolder;
@@ -716,10 +815,7 @@
   }
 
   /* ==========================================================================
-     Server Maps (public/maps/ -> maps-manifest.json)
-     The manifest is generated at build time (scripts/build-manifest.mjs) and carries
-     each map's metadata, so the lobby is instant and a song is only downloaded when
-     it is first previewed/played (and then cached in IndexedDB).
+     Server Maps
      ========================================================================== */
   const mapUrl = en => 'maps/' + en.file.split('/').map(encodeURIComponent).join('/') + (en.ver ? '?v=' + en.ver : '');
 
@@ -749,7 +845,7 @@
     }
   }
 
-  // URLs (they include the content hash) that failed to parse
+  // url (they include the content hash) that failed to parse
   const BadMaps = {
     key: 'rw-bad-maps',
     list() { try { return JSON.parse(localStorage.getItem(this.key) || '[]'); } catch (e) { return []; } },
@@ -782,7 +878,7 @@
             continue;
           }
         } else {
-          // No metadata in the manifest: download + parse once, then remember it.
+          // No metadata in the manifest
           prev = LIB.find(m => m.source === 'server' && m.remote === url) || null;
           if (prev) { seen.add(prev.id); continue; }
           if (BadMaps.has(url)) continue;
@@ -792,7 +888,7 @@
           try {
             meta = parseSSPM(buf).meta;
           } catch (e) {
-            BadMaps.add(url); // don't re-download a corrupt file on every visit
+            BadMaps.add(url); // dont download a corrupt file
             throw e;
           }
           meta.ver = en.ver;
@@ -812,7 +908,7 @@
         ENT.delete(meta.id);
         changed = true;
       } catch (e) {
-        if (prev) seen.add(prev.id); // don't drop a working map because of a transient error
+        if (prev) seen.add(prev.id); // dont drop a working map because of a transient error
         console.warn('Skipping map ' + en.file + ':', e.message);
       }
     }
@@ -829,7 +925,7 @@
     if (changed) await refreshLib();
   }
 
-  // Download one map (or read it from the cache). Concurrent callers share one request.
+  // Download one map (or read it from the cache) concurrent callers share one request
   const FETCHING = new Map();
   function fetchBlob(meta) {
     if (FETCHING.has(meta.id)) return FETCHING.get(meta.id);
@@ -904,7 +1000,7 @@
      Map Cache
      ========================================================================== */
   const ENT = new Map();
-  // Object URL of the map's cover image (created on first use), or null when the map has none
+  // Object URL of the map's cover image
   function coverUrlOf(e) {
     if (!e || !e.cover) return null;
     if (!e.coverUrl) e.coverUrl = URL.createObjectURL(new Blob([e.cover.bytes], { type: e.cover.mime }));
@@ -955,11 +1051,11 @@
   }
 
   /* ==========================================================================
-     Audio Processing Subsystem (Web Audio API)
+     Audio Processing Subsystem
      ========================================================================== */
   let AC = null, master, analyser, sfx, previewEl, previewGain, freq = new Uint8Array(512), bass = 0;
   let kickEnv = 0, kickPrev = 0, kickAvg = 0.2, kickLast = 0;
-  // What the renderers actually show: kick and bass eased (fast attack, slow release) so nothing strobes
+  // what the renderers actually show
   let kickVis = 0, bassVis = 0;
   function stepVis(dt) {
     const kt = kickEnv * KICK_STRENGTH;
@@ -1018,8 +1114,7 @@
     kickPrev = low;
   }
 
-  // Kick detection for a whole song, done once after decoding. Gameplay uses these exact
-  // timestamps, so the background reacts in perfect sync (no analyser latency).
+  // Kick detection
   function detectKicks(buf) {
     const sr = buf.sampleRate, c0 = buf.getChannelData(0);
     const c1 = buf.numberOfChannels > 1 ? buf.getChannelData(1) : c0;
@@ -1053,7 +1148,7 @@
     return { t: Float32Array.from(times), s: Float32Array.from(str), n: times.length, lo: 0 };
   }
 
-  // Hit / miss sounds are rendered once into buffers, so playing one is a single cheap node
+  // Hit / miss sounds
   const BLIPS = {};
   function makeBlips() {
     const mk = (type, f0, f1, dur, vol) => {
@@ -1419,7 +1514,7 @@
         chips.insertAdjacentHTML('beforeend', '<li>' + esc(t) + '</li>');
       }
 
-      // Hover leaderboard: show what we know right away, then refresh from the server
+      // Hover leaderboard
       paintCardBoard(Leaderboard.peek(m.id));
       Leaderboard.get(m.id).then(r => {
         if (hov && hov.meta && hov.meta.id === m.id) paintCardBoard(r.scores);
@@ -1619,7 +1714,7 @@
   }
   let g = null, gW = 0, gH = 0, gDpr = 1;
 
-  // Adaptive resolution: when frames take clearly longer than the display refresh, lower the render scale
+  // Adaptive resolution
   const dyn = { s: 1, dts: new Float32Array(180), i: 0, n: 0, lastChange: 0, upWait: 4000, calm: 0 };
   function adaptRes(dt) {
     if (S.quality === 'potato' || !GL) return;
@@ -1754,7 +1849,7 @@
       events: [],
       lastMiss: -1e9,
       lastHit: -1e9,
-      approach: rp ? rp.approach : S.approach,
+      approach: S.approach,                               // replays follow the viewers own settings
       replay: rp || null,
       recC: [], recN: 0,
       buf,
@@ -1766,7 +1861,7 @@
       cam: { x: 0, y: 0 },
       lastF: performance.now(),
       lastMs: e.notes[N - 1].ms,
-      auto: !rp && location.hash === '#auto',
+      auto: !rp && /^#auto(-debug)?$/.test(location.hash),
       hadLock: false,
       s0: 100,
       lockWatch: performance.now(),
@@ -1825,8 +1920,8 @@
 
   /* ---- Input ----
      pointerrawupdate arrives straight from the device (not aligned to frames), so the cursor
-     is up to a frame fresher than with mousemove. Every sample is stored with its own
-     timestamp and the judge replays them, so hits don't depend on the frame rate. */
+     is up to a frame fresher than with mousemove. every sample is stored with its own
+     timestamp and the judge replays them so hits dont depend on the frame rate. */
   const HN = 2048;
   let rawSeenAt = -1e9;
 
@@ -1856,7 +1951,7 @@
   addEventListener('mousemove', e => onMove(e, false));
   addEventListener('pointerrawupdate', e => onMove(e, true));
   if (!('onpointerrawupdate' in window)) {
-    // Browsers without raw events (Firefox, Safari): read every coalesced sample, not just one per frame
+    // Browsers without raw events
     addEventListener('pointermove', e => {
       if (!g || locked()) return;                         // locked mode keeps using mousemove deltas
       const list = e.getCoalescedEvents ? e.getCoalescedEvents() : null;
@@ -1908,7 +2003,7 @@
     g.cdStart = performance.now();
   }
 
-  // Cursor position at a given performance.now() time, from the recorded samples
+  // Cursor position at a given performance.now() time from the recorded samples
   function histAt(pt) {
     if (!g.hC) return [g.cur.x, g.cur.y];
     let j = (g.hI - 1 + HN) % HN;
@@ -1924,7 +2019,7 @@
     return [g.hX[j], g.hY[j]];
   }
 
-  // Slab test: when (0..1) a segment first enters a box, or -1
+  // Slab test when (0..1) a segment first enters a box, or -1
   function segEnter(x0, y0, x1, y1, bx, by, h) {
     let t0 = 0, t1 = 1;
     for (const [p, q, c] of [[x0, x1, bx], [y0, y1, by]]) {
@@ -1985,14 +2080,12 @@
   }
 
   // Hit Detection & Logic Judge
-  // A note can be hit from the moment it reaches the grid until MAX_LATE_TIME later.
-  // It can never be hit early.
   function judge(t) {
     const N = g.notes, st = g.states, pf = performance.now();
     for (let i = g.lo; i < g.N; i++) {
       const n = N[i];
       if (st[i] !== 0) continue;
-      if (n.ms > t) break;                                  // not at the grid yet: no early hits
+      if (n.ms > t) break;                                  // not at the grid yet
 
       const end = Math.min(t, n.ms + MAX_LATE_TIME);
       const ph = sweepHit(n.x - 1, n.y - 1, pf - (t - n.ms), pf - (t - end));
@@ -2003,7 +2096,7 @@
     while (g.lo < g.N && st[g.lo] !== 0) g.lo++;
   }
 
-  // Replay: results were recorded per note (delay after n.ms, or 254/255 = not hit)
+  // Replay
   function replayJudge(t) {
     const R = g.replay, N = g.notes, st = g.states;
     for (let i = g.lo; i < g.N; i++) {
@@ -2030,7 +2123,7 @@
       return;
     }
     if (g.auto) {
-      // Demo bot: feed cursor samples every 8 ms of song time so it behaves the same at any frame rate
+      // Demo bot
       const pf = performance.now();
       let tk = g.autoT === undefined ? t : g.autoT;
       for (tk += 8; tk <= t; tk += 8) {
@@ -2086,7 +2179,7 @@
     g.cam.x += ((still ? 0 : g.cur.x * 0.09) - g.cam.x) * k;
     g.cam.y += ((still ? 0 : g.cur.y * 0.09) - g.cam.y) * k;
 
-    // Kick pulse: exact song timestamps when we have them, live detector otherwise
+    // Kick pulse
     kickEnv *= Math.exp(-dtF / 120);
     stepVis(dtF);
     const K = g.kicks;
@@ -2102,7 +2195,7 @@
       GL.render({
         W: gW, H: gH, t,
         notes: g.notes, states: g.states, hitAt: g.hitAt, approach: g.approach,
-        cur: g.cur, trail: g.trail, cam: g.cam, style: noteStyle(),
+        cur: g.cur, trail: g.trail, cam: g.cam, style: noteStyle(), cursor: buildCursor(t, performance.now(), dtF, fxFor()),
         bass: bassVis, kick: kickVis, kicks: K, fx: fxFor()
       });
       g.s0 = Math.min(gH * 0.17, gW * 0.13);
@@ -2215,19 +2308,34 @@
   }
 
   /* ==========================================================================
-     Replays: cursor sampled every REC_DT ms of song time + result of every note
+     Replays
      ========================================================================== */
   const REC_DT = 16;
 
   const b64enc = u8 => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
   const b64dec = str => { const s = atob(str), u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u; };
-  const pipeBytes = async (u8, stream) => new Uint8Array(await new Response(new Blob([u8]).stream().pipeThrough(stream)).arrayBuffer());
+  // Runs the bytes through a (de)compression stream; `limit` stops decompression bombs
+  const pipeBytes = async (u8, stream, limit = Infinity) => {
+    const rd = new Blob([u8]).stream().pipeThrough(stream).getReader(), parts = [];
+    let n = 0;
+    for (;;) {
+      const { done, value } = await rd.read();
+      if (done) break;
+      n += value.length;
+      if (n > limit) { rd.cancel(); throw new Error('Replay is damaged'); }
+      parts.push(value);
+    }
+    const out = new Uint8Array(n);
+    let o = 0;
+    for (const p of parts) { out.set(p, o); o += p.length; }
+    return out;
+  };
 
   async function packReplay(gg, t, win, mapId, scores) {
-    // everything is read from gg synchronously, before the first await
+    // everything is read from gg synchronously before the first await
     const rid = Replays.key(mapId, currentPlayer.name, currentPlayer.school);
     const old = Replays.scoreOf(rid);
-    if (old != null && old > gg.score) return;            // keep the player's better run
+    if (old != null && old > gg.score) return;            // keep the players better run
     const M = gg.recC.length / 2, N = gg.N;
     const cur = new Int16Array(M * 2);
     let px = 0, py = 0;
@@ -2257,9 +2365,13 @@
       try { raw = await ReplaysNet.fetch(ref); } catch (e) { raw = null; }
     }
     if (!raw) throw new Error('Replay data is not available');
-    let u8 = b64dec(raw.d);
-    if (raw.gz) u8 = await pipeBytes(u8, new DecompressionStream('gzip'));
     const { M, N } = raw;
+    // The data may come from the server
+    if (!Number.isInteger(M) || !Number.isInteger(N) || M < 0 || N < 0 || M > 200000 || N > 200000 || typeof raw.d !== 'string' || raw.d.length > 1500000) throw new Error('Replay is damaged');
+    const want = M * 4 + N;
+    let u8 = b64dec(raw.d);
+    if (raw.gz) u8 = await pipeBytes(u8, new DecompressionStream('gzip'), want);
+    if (u8.length < want) throw new Error('Replay is damaged');
     const cur = new Int16Array(u8.buffer.slice(u8.byteOffset, u8.byteOffset + M * 4));
     const x = new Float32Array(M), y = new Float32Array(M);
     let px = 0, py = 0;
@@ -2402,7 +2514,7 @@
       el.textContent = 'Rank #' + r.rank + ' · new personal best!';
       el.classList.add('good');
     } else {
-      el.textContent = 'Rank #' + r.rank + ' · your best here is ' + fmt(r.best);
+      el.textContent = 'Rank #' + r.rank + (Number.isFinite(+r.best) && r.best != null ? ' · your best here is ' + fmt(+r.best) : '');
     }
   }
 
@@ -2467,7 +2579,7 @@
     refreshLib();
   }
 
-  // Event Handlers for Navigation Controls
+  // Event Handlers for Nav
   $('#btnBack').onclick = toLobby;
   $('#btnReplay').onclick = () => { const m = g.meta; g.over = true; startGame(m); };
   $('#pResume').onclick = resumeGame;
@@ -2547,14 +2659,14 @@
       const mine = (s.name + '|' + s.school).toLowerCase() === me;
       const rkey = Replays.key(mapId, s.name, s.school);
       const rk = idx < REPLAY_TOP
-        ? `<span class="rpc" data-n="${esc(s.name)}" data-s="${esc(s.school)}" data-sc="${s.score}">${Replays.scoreOf(rkey) === s.score ? '<button class="ghost rp">&#9654; Watch</button>' : ''}</span>` : '';
+        ? `<span class="rpc" data-n="${esc(s.name)}" data-s="${esc(s.school)}" data-sc="${Number(s.score) || 0}">${Replays.scoreOf(rkey) === s.score ? '<button class="ghost rp">&#9654; Watch</button>' : ''}</span>` : '';
       html += `<tr class="${mine ? 'me' : ''}">
         <td>${idx + 1}</td>
         <td><b>${esc(s.name)}</b></td>
         <td>${esc(s.school)}</td>
         <td>${fmt(s.score)}</td>
-        <td>${Number(s.acc).toFixed(2)}%</td>
-        <td>x${s.maxCombo}</td>
+        <td>${(Number(s.acc) || 0).toFixed(2)}%</td>
+        <td>x${Number(s.maxCombo) || 0}</td>
         <td>${esc(s.grade || '-')}${s.cleared === false ? ' <small>(failed)</small>' : ''}</td>
         <td>${rk}</td>
       </tr>`;
@@ -2568,7 +2680,7 @@
       const c = b.parentElement, meta = LIB.find(m => m.id === mapId);
       if (meta) startGame(meta, { mapId, name: c.dataset.n, school: c.dataset.s, score: +c.dataset.sc });
     };
-    // Replays other people recorded live on the server: show Watch for every top-3 row that has one
+    // Replays other people recorded live
     if (!offline) ReplaysNet.index(mapId).then(list => {
       if (listEl.dataset.map !== String(mapId)) return;
       listEl.querySelectorAll('.rpc').forEach(c => {
@@ -2723,7 +2835,7 @@
   function paintPalettes() {
     palWrap.querySelectorAll('.sw').forEach(sw => {
       const p = PALETTES.find(x => x.id === sw.dataset.id);
-      const list = p.custom ? S.custom.slice(0, clamp(S.customN | 0, 1, 4)) : p.c;
+      const list = (p.custom ? S.custom.slice(0, clamp(S.customN | 0, 1, 4)) : p.c).filter(c => /^#[0-9a-f]{6}$/i.test(c));
       if (list.length > 6) {                               // wheels: little grid of squares
         const cols = Math.ceil(Math.sqrt(list.length));
         sw.style.display = 'grid';
@@ -2750,6 +2862,65 @@
   sc.oninput = () => { S.noteScale = +sc.value; $('#oScale').textContent = S.noteScale.toFixed(2) + 'x'; invalidateStyle(); saveS(); };
   op.value = S.noteOpacity; $('#oOpac').textContent = Math.round(S.noteOpacity * 100) + '%';
   op.oninput = () => { S.noteOpacity = +op.value; $('#oOpac').textContent = Math.round(S.noteOpacity * 100) + '%'; invalidateStyle(); saveS(); };
+  // Note inside opacity
+  const fl = $('#sFill');
+  fl.value = S.noteFill; $('#oFill').textContent = Math.round(S.noteFill * 100) + '%';
+  fl.oninput = () => { S.noteFill = +fl.value; $('#oFill').textContent = Math.round(S.noteFill * 100) + '%'; invalidateStyle(); saveS(); };
+
+  // Cursor
+  const bindRange = (id, out, key, fmtv) => {
+    const el = $(id), o = $(out);
+    el.value = S[key]; o.textContent = fmtv(+S[key]);
+    el.oninput = () => { S[key] = +el.value; o.textContent = fmtv(S[key]); saveS(); };
+  };
+  bindRange('#sCurScale', '#oCurScale', 'cursorScale', v => v.toFixed(2) + 'x');
+  bindRange('#sCurSpin', '#oCurSpin', 'cursorSpin', v => Math.round(v) + ' °/sec');
+  bindRange('#sTrailDetail', '#oTrailDetail', 'trailDetail', v => String(Math.round(v)));
+  bindRange('#sTrailTime', '#oTrailTime', 'trailTime', v => v.toFixed(2) + ' s');
+  const bindSel = (id, key) => { const el = $(id); el.value = S[key]; el.onchange = () => { S[key] = el.value; saveS(); refreshCursorUi(); }; };
+  const bindChk = (id, key) => { const el = $(id); el.checked = !!S[key]; el.onchange = () => { S[key] = el.checked; saveS(); refreshCursorUi(); }; };
+  bindSel('#sCurShape', 'cursorShape'); bindSel('#sCurMode', 'cursorColorMode'); bindSel('#sTrailFade', 'trailFade');
+  bindChk('#sTrail', 'trailOn'); bindChk('#sSmart', 'smartTrail');
+  $('#sCurColor').value = S.cursorColor;
+  $('#sCurColor').oninput = e => { S.cursorColor = e.target.value; saveS(); };
+  function refreshCursorUi() {
+    const prev = $('#sCurImgPrev');
+    prev.hidden = !S.cursorImage;
+    if (S.cursorImage) prev.src = S.cursorImage; else prev.removeAttribute('src');
+    $('#sCurImgRow').classList.toggle('off', S.cursorShape !== 'image');
+    $('#sCurColor').classList.toggle('off', S.cursorColorMode !== 'custom');
+    for (const id of ['#sTrailFade', '#sTrailDetail', '#sTrailTime', '#sSmart']) $(id).classList.toggle('off', !S.trailOn);
+  }
+  // Custom cursor image: re-encoded as a small PNG, so only a harmless image ever gets stored
+  $('#sCurImgBtn').onclick = () => $('#sCurImgFile').click();
+  $('#sCurImgReset').onclick = () => { S.cursorImage = ''; if (S.cursorShape === 'image') S.cursorShape = 'circle'; $('#sCurShape').value = S.cursorShape; saveS(); syncCursorImage(); refreshCursorUi(); };
+  $('#sCurImgFile').onchange = async e => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    if (!/^image\/(png|jpeg|webp|gif)$/.test(f.type) || f.size > 8 * 1024 * 1024) { toast('Choose a PNG, JPEG, WebP or GIF image under 8 MB.'); return; }
+    try {
+      const bmp = await createImageBitmap(f);
+      let side = 192, url = '';
+      for (let tries = 0; tries < 3; tries++, side = Math.round(side / 2)) {
+        const sc = Math.min(1, side / Math.max(bmp.width, bmp.height));
+        const w = Math.max(1, Math.round(bmp.width * sc)), h = Math.max(1, Math.round(bmp.height * sc));
+        const cv2 = document.createElement('canvas');
+        cv2.width = side; cv2.height = side;                      // square, image centred
+        cv2.getContext('2d').drawImage(bmp, (side - w) / 2, (side - h) / 2, w, h);
+        url = cv2.toDataURL('image/png');
+        if (url.length < 600000) break;
+      }
+      bmp.close && bmp.close();
+      if (url.length >= 900000) throw new Error('too large');
+      S.cursorImage = url; S.cursorShape = 'image';
+      $('#sCurShape').value = 'image';
+      saveS(); syncCursorImage(); refreshCursorUi();
+    } catch (err) { toast('Could not use that image.'); }
+  };
+  syncCursorImage();
+  refreshCursorUi();
+
   $('#sFps').checked = !!S.showFps;
   $('#sFps').onchange = e => { S.showFps = e.target.checked; saveS(); fpsEl.hidden = !S.showFps; };
   paintPalettes();
@@ -2810,7 +2981,7 @@
   };
 
   let tick = 0;
-  // FPS counter (Settings > Show FPS). Browsers only run animation frames at the display's refresh rate.
+  // FPS counter
   const fpsEl = document.createElement('div');
   fpsEl.id = 'fps';
   fpsEl.hidden = true;
@@ -2853,14 +3024,15 @@
 
   renderCard();
   Store.ready.then(async () => {
-    await refreshLib();       // instant: whatever is cached from last visit
-    await syncServerMaps();   // then pick up new/changed/removed maps from /maps/
-    Leaderboard.flush();      // upload any scores saved while offline
-    prefetchMaps();           // warm the cache in the background
+    await refreshLib();
+    await syncServerMaps();
+    Leaderboard.flush();
+    prefetchMaps();
   });
   requestAnimationFrame(loop);
 
-  window.RW = {
+  // Debug handle (Holy shi what you lookin at)
+  if (location.hash.includes('debug')) window.RW = {
     get g() { return g; },
     get lib() { return LIB; },
     S,
