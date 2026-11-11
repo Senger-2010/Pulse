@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Pulse!</title>
   <meta name="theme-color" content="#07050f">
+  <!-- Only this site's own scripts run; fonts come from Google Fonts. (The _headers file adds the rules a meta tag cannot, like frame-ancestors.) -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob: https://cdn.discordapp.com https://media.discordapp.net; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta name="referrer" content="no-referrer">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27><text y=%27.9em%27 font-size=%2790%27>💠</text></svg>">
   
   <!-- External Fonts -->
@@ -87,8 +90,7 @@
           <b>Esc</b><span>Pause</span>
           <b>Drop</b><span>Drag .sspm files onto the page to add them</span>
           <b>Totally</b><span>Not vibe coded.</span>
-                            <p>Change logs:</p>
-        <pre>
+                  <pre>
 [+] New 助けて map: かたぎり (katagiri) - CAT ROTATION!
 [+] You can now watch replay clips of top players.
 [+] Preview now also shows cover image.
@@ -97,6 +99,7 @@
 (Less input delay available in settings)
 [+] Notes can now be customized.
 [+] Fixed replay clips only in client.
+[+] Cursor customization!!
         </pre>
         </div>
         <button class="btn" id="btnStart">Start</button>
@@ -279,7 +282,6 @@
                 <option value="rounded">Rounded</option>
                 <option value="square">Square</option>
                 <option value="circle">Circle</option>
-                <option value="outline">Outline</option>
               </select>
 
               <label for="sScale">Note scale</label>
@@ -289,8 +291,69 @@
               <label for="sOpac">Note opacity</label>
               <output id="oOpac"></output>
               <input type="range" id="sOpac" min="0.2" max="1" step="0.05">
+
+              <label for="sFill">Note inside opacity</label>
+              <output id="oFill"></output>
+              <input type="range" id="sFill" min="0" max="1" step="0.05">
             </div>
           </div>
+
+          <div class="set-sep">Cursor</div>
+
+          <label for="sCurShape">Cursor shape</label>
+          <span></span>
+          <select id="sCurShape">
+            <option value="circle">Circle</option>
+            <option value="square">Square</option>
+            <option value="image">Custom image</option>
+          </select>
+
+          <div class="img-row" id="sCurImgRow">
+            <button type="button" class="ghost" id="sCurImgBtn">Click to replace</button>
+            <img id="sCurImgPrev" alt="" hidden>
+            <button type="button" class="ghost" id="sCurImgReset" title="Remove the image" aria-label="Remove the cursor image">&#8630;</button>
+            <input type="file" id="sCurImgFile" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+          </div>
+
+          <label for="sCurMode">Color mode</label>
+          <span></span>
+          <select id="sCurMode">
+            <option value="note">Note color</option>
+            <option value="custom">Custom color</option>
+          </select>
+
+          <label for="sCurColor">Color</label>
+          <input type="color" id="sCurColor" class="colorin">
+
+          <label for="sCurScale">Cursor scale</label>
+          <output id="oCurScale"></output>
+          <input type="range" id="sCurScale" min="0.2" max="3" step="0.05">
+
+          <label for="sCurSpin">Cursor spin (square / image)</label>
+          <output id="oCurSpin"></output>
+          <input type="range" id="sCurSpin" min="0" max="720" step="1">
+
+          <label for="sTrail">Cursor trail</label>
+          <input type="checkbox" id="sTrail" class="chk">
+
+          <label for="sSmart">Smart trail</label>
+          <input type="checkbox" id="sSmart" class="chk">
+
+          <label for="sTrailFade">Trail fade mode</label>
+          <span></span>
+          <select id="sTrailFade">
+            <option value="scale">Scale only</option>
+            <option value="fade">Fade only</option>
+            <option value="both">Scale and fade</option>
+          </select>
+
+          <label for="sTrailDetail">Trail detail</label>
+          <output id="oTrailDetail"></output>
+          <input type="range" id="sTrailDetail" min="2" max="48" step="1">
+
+          <label for="sTrailTime">Trail time</label>
+          <output id="oTrailTime"></output>
+          <input type="range" id="sTrailTime" min="0.02" max="0.5" step="0.01">
 
           <div class="set-sep">Display</div>
 
