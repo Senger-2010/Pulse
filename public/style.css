@@ -263,7 +263,7 @@ canvas {
   color: var(--dim);
 }
 
-/* Difficulty Buttons */
+/*Difficulty Buttons*/
 .diffs {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -423,7 +423,7 @@ canvas {
 }
 
 /* ==========================================================================
-   Overlays, Modals & Panels
+   Overlays, Modals, Panels
    ========================================================================== */
 .ovl {
   position: absolute;
@@ -799,7 +799,7 @@ canvas {
 }
 
 /* ==========================================================================
-   Responsive Adaptations
+   Responsive Adaptation
    ========================================================================== */
 @media (max-width: 760px) {
   .stage {
@@ -830,10 +830,10 @@ canvas {
 }
 
 /* ==========================================================================
-   Additions: stacking order, results rank line, leaderboard highlights
+   Additions: stacking order, results rank line, leaderboard highlight
    ========================================================================== */
 /* Modals opened from the results screen must sit above it (same z-index
-   as .ovl would otherwise lose to the later-in-DOM results overlay). */
+   as .ovl would otherwise lose to the later-in-DOM results overlay) */
 .ovl.modal-top {
   z-index: 25;
 }
@@ -1033,3 +1033,35 @@ canvas {
   color: var(--cyan);
   pointer-events: none;
 }
+
+/* Cursor settings */
+.img-row {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.img-row #sCurImgBtn { flex: 1; }
+
+#sCurImgPrev {
+  width: 36px;
+  height: 36px;
+  object-fit: contain;
+  border-radius: 50%;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+}
+
+.colorin {
+  width: 44px;
+  height: 30px;
+  padding: 0;
+  justify-self: end;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.set.off,
+.off { opacity: 0.45; }
