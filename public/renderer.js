@@ -4,7 +4,7 @@
 (function () {
   'use strict';
 
-  const D = 3.4, ZMAX = 46, NOTE = 0.88, CUR = 0.2, HITFADE = 130;
+  const D = 3.4, ZMAX = 46, NOTE = 0.88, CUR = 0.2, HITFADE = 10;
   const PINK = [1.0, 0.24, 0.44], CYAN = [0.21, 0.84, 1.0], GRAY = [0.59, 0.59, 0.67];
   const RAILC = [0.51, 0.39, 1.0], FRAMEC = [0.82, 0.75, 1.0], GRIDC = [0.78, 0.71, 1.0];
 
