@@ -1,11 +1,9 @@
-// Pulse! replay storage (Netlify Function v2 + Netlify Blobs)
+//   replay storage
 //
 //   POST   /api/replays   { mapId, name, school, score, replay }   keep a player's best replay, top 3 per map
 //   GET    /api/replays?map=ID                                       -> { replays: [{ name, school, score }] }
 //   GET    /api/replays?map=ID&name=N&school=S                       -> { replay }
 //   DELETE /api/replays?map=ID | ?name=N[&school=S] | ?all=1         (header x-admin-key = ADMIN_KEY env var)
-//
-// Needs the package  @netlify/blobs  (npm install @netlify/blobs).
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { getStore } from '@netlify/blobs';
 
