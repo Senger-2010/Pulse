@@ -1,4 +1,3 @@
-# Netlify security headers (put this file in the folder that gets published, next to index.html)
 /*
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
