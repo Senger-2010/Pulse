@@ -3,9 +3,6 @@
 //   GET    /api/scores?map=<mapId>&limit=10      top scores for a map
 //   POST   /api/scores                            submit a score (JSON body)
 //   DELETE /api/scores?map=..&name=..&school=..   admin only (x-admin-key header)
-//
-// Storage: Netlify Blobs (store "pulse-scores"), one JSON array per map.
-// One entry per player (name + school) per map: only their best score is kept.
 
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { getStore } from '@netlify/blobs';
