@@ -1,11 +1,4 @@
 // Scans public/maps/ (recursively) for .sspm files and writes public/maps-manifest.json.
-//
-// Why: static hosting (Netlify) can't list a folder, so the game reads this manifest.
-// It also contains each map's metadata, so the lobby doesn't have to download
-// every song just to show names, note counts and difficulty.
-//
-// Optional: put maps in a subfolder named easy / hard / insane / death to force
-// their difficulty folder, e.g. public/maps/insane/MySong.sspm
 
 import { readdir, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
